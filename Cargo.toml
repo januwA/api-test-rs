@@ -1,0 +1,39 @@
+[package]
+name = "api-test-rs"
+version = "0.1.1"
+edition = "2021"
+
+build = "build.rs"
+
+[profile.release]
+opt-level = 'z'
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = 'abort'
+incremental = false
+codegen-units = 1
+rpath = false
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+eframe = { version = "0.21", default-features = false, features = ["accesskit", "glow"]}
+egui_extras = { version = "0.21", features = ["image"] }
+image = { version = "0.24" }
+env_logger = "0.10"
+ehttp = "0.2"
+poll-promise = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+
+# https://docs.rs/reqwest/latest/reqwest/
+reqwest = { version = "0.11", features = ["json", "multipart"] }
+
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
