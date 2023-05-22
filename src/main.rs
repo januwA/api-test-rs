@@ -14,6 +14,7 @@ use eframe::{
 use egui_extras::RetainedImage;
 use poll_promise::Promise;
 use reqwest::header::HeaderMap;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::runtime::Runtime;
 
@@ -59,9 +60,13 @@ fn main() -> Result<(), eframe::Error> {
     )
 }
 
-struct ApiTestApp {
+#[derive(Serialize, Deserialize)]
+struct HttpConfig {
     method_idx: usize,
     url: String,
+
+    request_tab: RequestTab,
+    request_body_tab_idx: usize,
 
     request_query: Vec<PairUi>,
     request_header: Vec<PairUi>,
@@ -70,26 +75,23 @@ struct ApiTestApp {
     request_body_raw: String,
     request_body_raw_type_idx: usize,
 
+    #[serde(skip)]
     response_promise: Option<Promise<anyhow::Result<HttpResponse>>>,
+
+    #[serde(skip)]
     response_data_download_path: String,
 
-    req_tab: RequestTab,
-    req_body_tab_idx: usize,
-    rt: Runtime,
-
+    #[serde(skip)]
     response_tab_idx: usize,
 }
 
-impl Default for ApiTestApp {
+impl Default for HttpConfig {
     fn default() -> Self {
         Self {
-            req_body_tab_idx: Default::default(),
-            request_body_raw: Default::default(),
-            rt: tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap(),
+            method_idx: Default::default(),
             url: "http://127.0.0.1:3000/ping".to_string(),
+            request_body_tab_idx: Default::default(),
+            request_body_raw: Default::default(),
             response_promise: Default::default(),
             response_data_download_path: Default::default(),
             request_body_raw_type_idx: Default::default(),
@@ -97,9 +99,31 @@ impl Default for ApiTestApp {
             request_header: vec![PairUi::default()],
             request_body_form: vec![PairUi::default()],
             request_body_form_data: vec![PairUi::default()],
-            req_tab: RequestTab::Params,
-            method_idx: 0,
+            request_tab: RequestTab::Params,
             response_tab_idx: Default::default(),
+        }
+    }
+}
+
+struct ApiTestApp {
+    http_config: HttpConfig,
+    rt: Runtime,
+}
+
+impl Default for ApiTestApp {
+    fn default() -> Self {
+        let mut http_config: Option<HttpConfig> = None;
+
+        if let Ok(save_json) = std::fs::read("./save.json") {
+            http_config = Some(serde_json::from_slice(save_json.as_ref()).unwrap());
+        };
+
+        Self {
+            http_config: http_config.unwrap_or(HttpConfig::default()),
+            rt: tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
         }
     }
 }
@@ -114,12 +138,13 @@ impl ApiTestApp {
 impl ApiTestApp {
     fn http_send(&mut self) {
         let (sender, response_promise) = Promise::new();
-        self.response_promise = Some(response_promise);
+        self.http_config.response_promise = Some(response_promise);
 
-        let method = K_REQ_METHODS[self.method_idx].clone();
-        let url: String = self.url.clone();
+        let method = K_REQ_METHODS[self.http_config.method_idx].clone();
+        let url: String = self.http_config.url.clone();
 
         let request_query: Vec<(String, String)> = self
+            .http_config
             .request_query
             .clone()
             .into_iter()
@@ -127,6 +152,7 @@ impl ApiTestApp {
             .collect();
 
         let request_header: Vec<(String, String)> = self
+            .http_config
             .request_header
             .clone()
             .into_iter()
@@ -134,6 +160,7 @@ impl ApiTestApp {
             .collect();
 
         let request_body_form: Vec<(String, String)> = self
+            .http_config
             .request_body_form
             .clone()
             .into_iter()
@@ -141,15 +168,16 @@ impl ApiTestApp {
             .collect();
 
         let request_body_form_data: Vec<(String, String)> = self
+            .http_config
             .request_body_form_data
             .clone()
             .into_iter()
             .filter_map(|el| el.pair())
             .collect();
 
-        let req_body_tab_idx = self.req_body_tab_idx;
-        let body_raw_type_idx = self.request_body_raw_type_idx;
-        let body_raw = self.request_body_raw.clone();
+        let req_body_tab_idx = self.http_config.request_body_tab_idx;
+        let body_raw_type_idx = self.http_config.request_body_raw_type_idx;
+        let body_raw = self.http_config.request_body_raw.clone();
 
         self.rt.spawn(async move {
             let mut client = reqwest::Client::new();
@@ -331,7 +359,11 @@ impl ApiTestApp {
     fn tabs_panel(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             for (i, label) in K_REQ_TABS.iter().enumerate() {
-                ui.selectable_value(&mut self.req_tab, label.clone(), label.to_string());
+                ui.selectable_value(
+                    &mut self.http_config.request_tab,
+                    label.clone(),
+                    label.to_string(),
+                );
             }
         });
     }
@@ -339,7 +371,7 @@ impl ApiTestApp {
     fn req_header_panel(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         ui.vertical(|ui| {
             if ui.button("添加").clicked() {
-                self.request_header.push(PairUi::default());
+                self.http_config.request_header.push(PairUi::default());
             }
         });
 
@@ -387,7 +419,7 @@ impl ApiTestApp {
                                     });
                                 })
                                 .body(|mut body| {
-                                    self.request_header.retain_mut(|el| {
+                                    self.http_config.request_header.retain_mut(|el| {
                                         let mut r = true;
 
                                         body.row(30.0, |mut row| {
@@ -426,7 +458,7 @@ impl ApiTestApp {
     fn req_query_panel(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         ui.vertical(|ui| {
             if ui.button("添加").clicked() {
-                self.request_query.push(PairUi::default());
+                self.http_config.request_query.push(PairUi::default());
             }
         });
 
@@ -469,7 +501,7 @@ impl ApiTestApp {
                                 });
                             })
                             .body(|mut body| {
-                                self.request_query.retain_mut(|el| {
+                                self.http_config.request_query.retain_mut(|el| {
                                     let mut r = true;
 
                                     body.row(30.0, |mut row| {
@@ -510,18 +542,31 @@ impl ApiTestApp {
             ui.group(|ui| {
                 ui.horizontal(|ui| {
                     for (i, raw_type) in K_REQ_BODY_RAW_TYPES.iter().enumerate() {
-                        ui.radio_value(&mut self.request_body_raw_type_idx, i, raw_type.to_owned());
+                        ui.radio_value(
+                            &mut self.http_config.request_body_raw_type_idx,
+                            i,
+                            raw_type.to_owned(),
+                        );
                     }
                 });
             });
-            ui.text_edit_multiline(&mut self.request_body_raw);
+
+            egui::ScrollArea::vertical()
+                .id_source("row data scroll")
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.http_config.request_body_raw)
+                            .desired_rows(6),
+                    );
+                });
         });
     }
 
     fn req_body_form_panel(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         ui.vertical(|ui| {
             if ui.button("添加").clicked() {
-                self.request_body_form.push(PairUi::default());
+                self.http_config.request_body_form.push(PairUi::default());
             }
         });
 
@@ -569,7 +614,7 @@ impl ApiTestApp {
                                     });
                                 })
                                 .body(|mut body| {
-                                    self.request_body_form.retain_mut(|el| {
+                                    self.http_config.request_body_form.retain_mut(|el| {
                                         let mut r = true;
 
                                         body.row(30.0, |mut row| {
@@ -608,7 +653,9 @@ impl ApiTestApp {
     fn req_body_form_data_panel(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         ui.vertical(|ui| {
             if ui.button("添加").clicked() {
-                self.request_body_form_data.push(PairUi::default());
+                self.http_config
+                    .request_body_form_data
+                    .push(PairUi::default());
             }
         });
 
@@ -656,7 +703,7 @@ impl ApiTestApp {
                                     });
                                 })
                                 .body(|mut body| {
-                                    self.request_body_form_data.retain_mut(|el| {
+                                    self.http_config.request_body_form_data.retain_mut(|el| {
                                         let mut r = true;
 
                                         body.row(30.0, |mut row| {
@@ -693,7 +740,7 @@ impl ApiTestApp {
     }
 
     fn tab_content_panel(&mut self, ui: &mut Ui, ctx: &egui::Context) {
-        match self.req_tab {
+        match self.http_config.request_tab {
             RequestTab::Params => {
                 self.req_query_panel(ui, ctx);
             }
@@ -703,11 +750,15 @@ impl ApiTestApp {
             RequestTab::Body => {
                 ui.horizontal(|ui| {
                     for (i, label) in K_REQ_BODY_TABS.iter().enumerate() {
-                        ui.selectable_value(&mut self.req_body_tab_idx, i, label.to_owned());
+                        ui.selectable_value(
+                            &mut self.http_config.request_body_tab_idx,
+                            i,
+                            label.to_owned(),
+                        );
                     }
                 });
                 ui.painter();
-                match self.req_body_tab_idx {
+                match self.http_config.request_body_tab_idx {
                     // row
                     0 => {
                         self.req_body_raw_panel(ui, ctx);
@@ -739,6 +790,13 @@ impl ApiTestApp {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if ui.button("Save").clicked() {
+                        if let Ok(save_json) = serde_json::to_vec(&self.http_config) {
+                            if let Err(err) = std::fs::write("./save.json", save_json) {
+                                println!("save error: {}", err);
+                            }
+                        }
+                    }
                     if ui.button("Quit").clicked() {
                         frame.close();
                     }
@@ -810,15 +868,17 @@ impl eframe::App for ApiTestApp {
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_source("method").show_index(
                     ui,
-                    &mut self.method_idx,
+                    &mut self.http_config.method_idx,
                     K_REQ_METHODS.len(),
                     |i| K_REQ_METHODS[i].to_string(),
                 );
 
-                ui.add(egui::TextEdit::singleline(&mut self.url).desired_width(300.));
+                ui.add(egui::TextEdit::singleline(&mut self.http_config.url).desired_width(500.));
 
-                let send_btn = egui::Button::new("发送").min_size(vec2(100.0, 40.0));
-                if ui.add_enabled(!self.url.is_empty(), send_btn).clicked() {
+                if ui
+                    .add_enabled(!self.http_config.url.is_empty(), egui::Button::new("发送"))
+                    .clicked()
+                {
                     self.http_send();
                 }
             });
@@ -831,7 +891,7 @@ impl eframe::App for ApiTestApp {
             self.tab_content_panel(ui, ctx);
             ui.separator();
 
-            if let Some(response_promise) = &self.response_promise {
+            if let Some(response_promise) = &self.http_config.response_promise {
                 match response_promise.ready() {
                     Some(response_r) => match response_r {
                         Ok(response) => {
@@ -849,7 +909,7 @@ impl eframe::App for ApiTestApp {
                             ui.horizontal(|ui| {
                                 for (i, label) in K_RESPONSE_TABS.iter().enumerate() {
                                     ui.selectable_value(
-                                        &mut self.response_tab_idx,
+                                        &mut self.http_config.response_tab_idx,
                                         i,
                                         label.to_owned(),
                                     );
@@ -857,7 +917,7 @@ impl eframe::App for ApiTestApp {
                             });
                             ui.separator();
 
-                            match self.response_tab_idx {
+                            match self.http_config.response_tab_idx {
                                 // Data
                                 0 => {
                                     ui.horizontal(|ui| {
@@ -874,19 +934,26 @@ impl eframe::App for ApiTestApp {
 
                                             ui.add(
                                                 egui::TextEdit::singleline(
-                                                    &mut self.response_data_download_path,
+                                                    &mut self
+                                                        .http_config
+                                                        .response_data_download_path,
                                                 )
                                                 .hint_text(r#"c:\o.jpg"#),
                                             );
                                             if ui
                                                 .add_enabled(
-                                                    !self.response_data_download_path.is_empty(),
+                                                    !self
+                                                        .http_config
+                                                        .response_data_download_path
+                                                        .is_empty(),
                                                     egui::Button::new("下载"),
                                                 )
                                                 .clicked()
                                             {
-                                                let download_path =
-                                                    self.response_data_download_path.clone();
+                                                let download_path = self
+                                                    .http_config
+                                                    .response_data_download_path
+                                                    .clone();
 
                                                 let p = std::path::Path::new(&download_path);
                                                 let p_dir = p.parent();
@@ -979,7 +1046,7 @@ struct HttpResponse {
     data_vec: Option<Vec<u8>>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PairUi {
     pub key: String,
     pub value: String,
@@ -1000,7 +1067,7 @@ impl PairUi {
     }
 }
 
-#[derive(PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 enum RequestTab {
     Params,
     Headers,
