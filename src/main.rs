@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::runtime::Runtime;
 
-mod cache;
 mod util;
 mod widget;
 
@@ -76,12 +75,21 @@ struct Group(pub String, pub Vec<HttpConfig>);
 
 /* #region App */
 struct ApiTestApp {
-    http_config: Option<HttpConfig>,
     rt: Runtime,
 
+    // 项目名称
+    project_name: String,
+
+    // 加载保存的项目文件路径
+    project_path: String,
+
     new_api_test_name: String,
+
     new_group_name: String,
+
     groups: Vec<Group>,
+
+    select_api_test_index: Option<(usize, usize)>,
 }
 
 impl Default for ApiTestApp {
@@ -92,20 +100,16 @@ impl Default for ApiTestApp {
         // };
 
         Self {
-            http_config: None,
+            project_name: Default::default(),
+            project_path: Default::default(),
             rt: tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .unwrap(),
-            groups: vec![
-                Group(
-                    "users".to_owned(),
-                    vec![HttpConfig::default(), HttpConfig::default()],
-                ),
-                Group("books".to_owned(), vec![HttpConfig::default()]),
-            ],
+            groups: vec![],
             new_group_name: Default::default(),
             new_api_test_name: Default::default(),
+            select_api_test_index: None,
         }
     }
 }
@@ -115,17 +119,16 @@ impl ApiTestApp {
         util::setup_custom_fonts(&cc.egui_ctx);
         Self::default()
     }
-
 }
 
 impl ApiTestApp {
     fn tabs_panel(&mut self, ui: &mut Ui, ctx: &egui::Context, http_config: &mut HttpConfig) {
-            ui.horizontal(|ui| {
-                for (i, label) in REQ_TABS.iter().enumerate() {
-                    let text = label.as_ref();
-                    ui.selectable_value(&mut http_config.request_tab, label.to_owned(), text);
-                }
-            });
+        ui.horizontal(|ui| {
+            for (i, label) in REQ_TABS.iter().enumerate() {
+                let text = label.as_ref();
+                ui.selectable_value(&mut http_config.request_tab, label.to_owned(), text);
+            }
+        });
     }
 
     fn menu_panel(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -133,25 +136,54 @@ impl ApiTestApp {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Save").clicked() {
-                        if let Ok(save_json) = serde_json::to_vec(&self.http_config) {
-                            if let Err(err) = std::fs::write("./save.json", save_json) {
-                                println!("save error: {}", err);
-                            }
-                        }
-                    }
                     if ui.button("Quit").clicked() {
                         frame.close();
                     }
                 });
 
-                ui.menu_button("Test Request", |ui| {
+                ui.menu_button("Request", |ui| {
                     ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.new_group_name);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.project_path)
+                                .hint_text("load project path"),
+                        );
+
+                        
+                        if ui
+                            .add_enabled(
+                                !self.project_path.is_empty(),
+                                egui::Button::new("Ok"),
+                            )
+                            .clicked()
+                        {
+                            let load_path = std::path::Path::new(&self.project_path);
+
+                            
+                            let data = std::fs::read(&self.project_path).unwrap();
+                            self.groups = serde_json::from_slice(data.as_slice()).unwrap();
+                            self.project_name = load_path.file_name().unwrap().to_str().unwrap().to_owned();
+
+                        }
+
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.project_name)
+                                .hint_text("set project name"),
+                        );
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_group_name)
+                                .hint_text("add a group"),
+                        );
+
                         if ui
                             .add_enabled(
                                 !self.new_group_name.is_empty(),
-                                egui::Button::new("Add Group"),
+                                egui::Button::new("Add"),
                             )
                             .clicked()
                         {
@@ -162,9 +194,22 @@ impl ApiTestApp {
                             if !name_exists {
                                 self.groups
                                     .push(Group(self.new_group_name.to_owned(), vec![]));
+                                self.new_group_name.clear();
                             }
                         }
                     });
+
+                    if ui.button("Save").clicked() {
+
+                        if !self.project_name.is_empty()
+                        {
+                            if let Ok(group_data) = serde_json::to_vec(&self.groups) {
+                                if let Err(err) = std::fs::write( format!("./{}.json", &self.project_name), group_data) {
+                                    println!("save error: {}", err);
+                                }
+                            }
+                        }
+                    }
                 });
             });
         });
@@ -208,42 +253,51 @@ impl eframe::App for ApiTestApp {
             .width_range(80.0..=200.0)
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.heading("Left Panel");
+                    ui.heading(&self.project_name);
                 });
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for group in &mut self.groups {
-                        CollapsingHeader::new(&group.0)
-                            .default_open(false)
-                            .show(ui, |ui| {
+                    self.groups
+                        .iter_mut()
+                        .enumerate()
+                        .for_each(|(group_index, group)| {
+                            CollapsingHeader::new(&group.0)
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    group
+                                        .1
+                                        .iter()
+                                        .enumerate()
+                                        .for_each(|(api_test_index, cfg)| {
+                                            if ui.button(&cfg.name).clicked() {
+                                                // self.http_config = Some(cfg.to_owned());
+                                                // self.http_config = Some(cfg);
+                                                self.select_api_test_index =
+                                                    Some((group_index, api_test_index));
+                                            }
+                                        });
 
-                                group.1.iter().for_each(|cfg| {
-                                    if ui.button(&cfg.name).clicked() {
-                                        // self.http_config = Some(cfg.to_owned());
-                                        // self.http_config = Some(cfg);
-                                    }
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut self.new_api_test_name)
+                                                .desired_width(80.0),
+                                        );
+
+                                        if ui
+                                            .add_enabled(
+                                                !self.new_api_test_name.is_empty(),
+                                                egui::Button::new("+"),
+                                            )
+                                            .clicked()
+                                        {
+                                            group.1.push(HttpConfig::from_name(
+                                                self.new_api_test_name.to_owned(),
+                                            ));
+                                            self.new_api_test_name.clear();
+                                        }
+                                    });
                                 });
-
-                                ui.horizontal(|ui| {
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut self.new_api_test_name)
-                                            .desired_width(80.0),
-                                    );
-
-                                    if ui
-                                        .add_enabled(
-                                            !self.new_api_test_name.is_empty(),
-                                            egui::Button::new("+"),
-                                        )
-                                        .clicked()
-                                    {
-                                        group.1.push(HttpConfig::from_name(
-                                            self.new_api_test_name.to_owned(),
-                                        ));
-                                    }
-                                });
-                            });
-                    }
+                        });
                 });
             });
 
@@ -260,163 +314,78 @@ impl eframe::App for ApiTestApp {
         //         });
         //     });
 
-        if let Some(http_config) = &mut self.http_config {
+        if let Some(ii) = self.select_api_test_index {
+            let http_config = &mut self.groups[ii.0].1[ii.1];
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_source("method")
-                    .selected_text(http_config.method.as_ref())
-                    .show_ui(ui, |ui| {
-                        for m in &METHODS {
-                            ui.selectable_value(
-                                &mut http_config.method,
-                                m.to_owned(),
-                                m.as_ref(),
-                            );
-                        }
-                    });
-
-                ui.add(egui::TextEdit::singleline(&mut http_config.url).desired_width(500.));
-
-                if ui
-                    .add_enabled(!http_config.url.is_empty(), egui::Button::new("发送"))
-                    .clicked()
-                {
-                   http_config.http_send();
-                }
-            });
-
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                for (i, label) in REQ_TABS.iter().enumerate() {
-                    let text = label.as_ref();
-                    ui.selectable_value(&mut http_config.request_tab, label.to_owned(), text);
-                }
-            });
-
-            ui.separator();
-
-            match http_config.request_tab {
-                RequestTab::Params => {
-                    ui.vertical(|ui| {
-                        if ui.button("添加").clicked() {
-                            http_config.request_query.push(PairUi::default());
-                        }
-                    });
-            
-                    ui.separator();
-            
-                    egui_extras::StripBuilder::new(ui)
-                        .size(egui_extras::Size::remainder().at_least(50.0).at_most(120.0)) // for the table
-                        // .size(egui_extras::Size::initial(200.0)) // for the table
-                        .vertical(|mut strip| {
-                            strip.cell(|ui| {
-                                egui::ScrollArea::vertical().id_source("param scroll").show(ui, |ui| {
-                                    let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
-            
-                                    let mut table = egui_extras::TableBuilder::new(ui)
-                                        .striped(true)
-                                        .resizable(true)
-                                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                                        .column(egui_extras::Column::auto())
-                                        .column(egui_extras::Column::initial(COLUMN_WIDTH_INITIAL).range(100.0..=400.0))
-                                        .column(egui_extras::Column::initial(COLUMN_WIDTH_INITIAL).range(100.0..=400.0))
-                                        .column(egui_extras::Column::initial(100.0).at_least(40.0).at_most(400.0))
-                                        // .column(egui_extras::Column::initial(100.0).range(40.0..=300.0))
-                                        // .column( egui_extras::Column::initial(100.0).at_least(40.0), )
-                                        // .column(egui_extras::Column::remainder())
-                                        // .max_scroll_height(200.0)
-                                        .min_scrolled_height(10.0)
-                                        // .scroll_to_row(1, Some(egui::Align::BOTTOM))
-                                        ;
-            
-                                    table
-                                        .header(20.0, |mut header| {
-                                            header.col(|ui| {
-                                                ui.strong("");
-                                            });
-                                            header.col(|ui| {
-                                                ui.strong("Key");
-                                            });
-                                            header.col(|ui| {
-                                                ui.strong("Value");
-                                            });
-                                        })
-                                        .body(|mut body| {
-                                            http_config.request_query.retain_mut(|el| {
-                                                let mut r = true;
-            
-                                                body.row(30.0, |mut row| {
-                                                    row.col(|ui| {
-                                                        ui.checkbox(&mut el.disable, "");
-                                                    });
-            
-                                                    row.col(|ui| {
-                                                        ui.add(
-                                                            egui::TextEdit::singleline(&mut el.key)
-                                                                .desired_width(f32::INFINITY),
-                                                        );
-                                                    });
-            
-                                                    row.col(|ui| {
-                                                        ui.add(
-                                                            egui::TextEdit::singleline(&mut el.value)
-                                                                .desired_width(f32::INFINITY),
-                                                        );
-                                                    });
-            
-                                                    row.col(|ui| {
-                                                        if ui.button("删除").clicked() {
-                                                            r = false;
-                                                        }
-                                                    });
-                                                });
-                                                r
-                                            });
-                                        })
-                                });
-                            });
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_source("method")
+                        .selected_text(http_config.method.as_ref())
+                        .show_ui(ui, |ui| {
+                            for m in &METHODS {
+                                ui.selectable_value(
+                                    &mut http_config.method,
+                                    m.to_owned(),
+                                    m.as_ref(),
+                                );
+                            }
                         });
-                }
-                RequestTab::Headers => {
-                    ui.vertical(|ui| {
-                        if ui.button("添加").clicked() {
-                            http_config.request_header.push(PairUi::default());
-                        }
-                    });
-            
-                    ui.separator();
-            
-                    egui_extras::StripBuilder::new(ui)
-                        .size(egui_extras::Size::remainder().at_least(50.0).at_most(120.0))
-                        .vertical(|mut strip| {
-                            strip.cell(|ui| {
-                                egui::ScrollArea::vertical()
-                                    .id_source("header scroll")
-                                    .show(ui, |ui| {
+
+                    ui.add(egui::TextEdit::singleline(&mut http_config.url).desired_width(500.));
+
+                    if ui
+                        .add_enabled(!http_config.url.is_empty(), egui::Button::new("发送"))
+                        .clicked()
+                    {
+                        http_config.http_send();
+                    }
+                });
+
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    for (i, label) in REQ_TABS.iter().enumerate() {
+                        let text = label.as_ref();
+                        ui.selectable_value(&mut http_config.request_tab, label.to_owned(), text);
+                    }
+                });
+
+                ui.separator();
+
+                match http_config.request_tab {
+                    RequestTab::Params => {
+                        ui.vertical(|ui| {
+                            if ui.button("添加").clicked() {
+                                http_config.request_query.push(PairUi::default());
+                            }
+                        });
+                
+                        ui.separator();
+                
+                        egui_extras::StripBuilder::new(ui)
+                            .size(egui_extras::Size::remainder().at_least(50.0).at_most(120.0)) // for the table
+                            // .size(egui_extras::Size::initial(200.0)) // for the table
+                            .vertical(|mut strip| {
+                                strip.cell(|ui| {
+                                    egui::ScrollArea::vertical().id_source("param scroll").show(ui, |ui| {
                                         let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
-            
+                
                                         let mut table = egui_extras::TableBuilder::new(ui)
                                             .striped(true)
                                             .resizable(true)
                                             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                                             .column(egui_extras::Column::auto())
-                                            .column(
-                                                egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
-                                                    .range(100.0..=400.0),
-                                            )
-                                            .column(
-                                                egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
-                                                    .range(100.0..=400.0),
-                                            )
-                                            .column(
-                                                egui_extras::Column::initial(100.0)
-                                                    .at_least(40.0)
-                                                    .at_most(400.0),
-                                            )
-                                            .min_scrolled_height(10.0);
-            
+                                            .column(egui_extras::Column::initial(COLUMN_WIDTH_INITIAL).range(100.0..=400.0))
+                                            .column(egui_extras::Column::initial(COLUMN_WIDTH_INITIAL).range(100.0..=400.0))
+                                            .column(egui_extras::Column::initial(100.0).at_least(40.0).at_most(400.0))
+                                            // .column(egui_extras::Column::initial(100.0).range(40.0..=300.0))
+                                            // .column( egui_extras::Column::initial(100.0).at_least(40.0), )
+                                            // .column(egui_extras::Column::remainder())
+                                            // .max_scroll_height(200.0)
+                                            .min_scrolled_height(10.0)
+                                            // .scroll_to_row(1, Some(egui::Align::BOTTOM))
+                                            ;
+                
                                         table
                                             .header(20.0, |mut header| {
                                                 header.col(|ui| {
@@ -430,28 +399,28 @@ impl eframe::App for ApiTestApp {
                                                 });
                                             })
                                             .body(|mut body| {
-                                                http_config.request_header.retain_mut(|el| {
+                                                http_config.request_query.retain_mut(|el| {
                                                     let mut r = true;
-            
+                
                                                     body.row(30.0, |mut row| {
                                                         row.col(|ui| {
                                                             ui.checkbox(&mut el.disable, "");
                                                         });
-            
+                
                                                         row.col(|ui| {
                                                             ui.add(
                                                                 egui::TextEdit::singleline(&mut el.key)
                                                                     .desired_width(f32::INFINITY),
                                                             );
                                                         });
-            
+                
                                                         row.col(|ui| {
                                                             ui.add(
                                                                 egui::TextEdit::singleline(&mut el.value)
                                                                     .desired_width(f32::INFINITY),
                                                             );
                                                         });
-            
+                
                                                         row.col(|ui| {
                                                             if ui.button("删除").clicked() {
                                                                 r = false;
@@ -462,372 +431,458 @@ impl eframe::App for ApiTestApp {
                                                 });
                                             })
                                     });
+                                });
                             });
+                    }
+                    RequestTab::Headers => {
+                        ui.vertical(|ui| {
+                            if ui.button("添加").clicked() {
+                                http_config.request_header.push(PairUi::default());
+                            }
                         });
-                }
-                RequestTab::Body => {
-                    ui.horizontal(|ui| {
-                        for (i, label) in REQ_BODY_TABS.iter().enumerate() {
-                            ui.selectable_value(
-                                &mut http_config.request_body_tab,
-                                label.to_owned(),
-                                label.as_ref(),
-                            );
-                        }
-                    });
-                    ui.painter();
-                    match http_config.request_body_tab {
-                        RequestBodyTab::Raw => {
-                            ui.vertical(|ui| {
-                                ui.group(|ui| {
-                                    ui.horizontal(|ui| {
-                                        for (i, raw_type) in REQ_BODY_RAW_TYPES.iter().enumerate() {
-                                            ui.radio_value(
-                                                &mut http_config.request_body_raw_type,
-                                                raw_type.to_owned(),
-                                                raw_type.as_ref(),
+                
+                        ui.separator();
+                
+                        egui_extras::StripBuilder::new(ui)
+                            .size(egui_extras::Size::remainder().at_least(50.0).at_most(120.0))
+                            .vertical(|mut strip| {
+                                strip.cell(|ui| {
+                                    egui::ScrollArea::vertical()
+                                        .id_source("header scroll")
+                                        .show(ui, |ui| {
+                                            let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
+                
+                                            let mut table = egui_extras::TableBuilder::new(ui)
+                                                .striped(true)
+                                                .resizable(true)
+                                                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                                                .column(egui_extras::Column::auto())
+                                                .column(
+                                                    egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
+                                                        .range(100.0..=400.0),
+                                                )
+                                                .column(
+                                                    egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
+                                                        .range(100.0..=400.0),
+                                                )
+                                                .column(
+                                                    egui_extras::Column::initial(100.0)
+                                                        .at_least(40.0)
+                                                        .at_most(400.0),
+                                                )
+                                                .min_scrolled_height(10.0);
+                
+                                            table
+                                                .header(20.0, |mut header| {
+                                                    header.col(|ui| {
+                                                        ui.strong("");
+                                                    });
+                                                    header.col(|ui| {
+                                                        ui.strong("Key");
+                                                    });
+                                                    header.col(|ui| {
+                                                        ui.strong("Value");
+                                                    });
+                                                })
+                                                .body(|mut body| {
+                                                    http_config.request_header.retain_mut(|el| {
+                                                        let mut r = true;
+                
+                                                        body.row(30.0, |mut row| {
+                                                            row.col(|ui| {
+                                                                ui.checkbox(&mut el.disable, "");
+                                                            });
+                
+                                                            row.col(|ui| {
+                                                                ui.add(
+                                                                    egui::TextEdit::singleline(&mut el.key)
+                                                                        .desired_width(f32::INFINITY),
+                                                                );
+                                                            });
+                
+                                                            row.col(|ui| {
+                                                                ui.add(
+                                                                    egui::TextEdit::singleline(&mut el.value)
+                                                                        .desired_width(f32::INFINITY),
+                                                                );
+                                                            });
+                
+                                                            row.col(|ui| {
+                                                                if ui.button("删除").clicked() {
+                                                                    r = false;
+                                                                }
+                                                            });
+                                                        });
+                                                        r
+                                                    });
+                                                })
+                                        });
+                                });
+                            });
+                    }
+                    RequestTab::Body => {
+                        ui.horizontal(|ui| {
+                            for (i, label) in REQ_BODY_TABS.iter().enumerate() {
+                                ui.selectable_value(
+                                    &mut http_config.request_body_tab,
+                                    label.to_owned(),
+                                    label.as_ref(),
+                                );
+                            }
+                        });
+                        ui.painter();
+                        match http_config.request_body_tab {
+                            RequestBodyTab::Raw => {
+                                ui.vertical(|ui| {
+                                    ui.group(|ui| {
+                                        ui.horizontal(|ui| {
+                                            for (i, raw_type) in REQ_BODY_RAW_TYPES.iter().enumerate() {
+                                                ui.radio_value(
+                                                    &mut http_config.request_body_raw_type,
+                                                    raw_type.to_owned(),
+                                                    raw_type.as_ref(),
+                                                );
+                                            }
+                                        });
+                                    });
+                        
+                                    egui::ScrollArea::vertical()
+                                        .id_source("row data scroll")
+                                        .max_height(120.0)
+                                        .show(ui, |ui| {
+                                            ui.add(
+                                                egui::TextEdit::multiline(&mut http_config.request_body_raw)
+                                                    .desired_rows(6),
                                             );
-                                        }
-                                    });
+                                        });
                                 });
-                    
-                                egui::ScrollArea::vertical()
-                                    .id_source("row data scroll")
-                                    .max_height(120.0)
-                                    .show(ui, |ui| {
-                                        ui.add(
-                                            egui::TextEdit::multiline(&mut http_config.request_body_raw)
-                                                .desired_rows(6),
-                                        );
-                                    });
-                            });
-                        }
-    
-                        RequestBodyTab::Form => {
-                            ui.vertical(|ui| {
-                                if ui.button("添加").clicked() {
-                                    http_config.request_body_form.push(PairUi::default());
-                                }
-                            });
-                    
-                            ui.separator();
-                    
-                            egui_extras::StripBuilder::new(ui)
-                                .size(egui_extras::Size::remainder().at_least(50.0).at_most(120.0))
-                                .vertical(|mut strip| {
-                                    strip.cell(|ui| {
-                                        egui::ScrollArea::vertical()
-                                            .id_source("body_form scroll")
-                                            .show(ui, |ui| {
-                                                let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
-                    
-                                                let mut table = egui_extras::TableBuilder::new(ui)
-                                                    .striped(true)
-                                                    .resizable(true)
-                                                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                                                    .column(egui_extras::Column::auto())
-                                                    .column(
-                                                        egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
-                                                            .range(100.0..=400.0),
-                                                    )
-                                                    .column(
-                                                        egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
-                                                            .range(100.0..=400.0),
-                                                    )
-                                                    .column(
-                                                        egui_extras::Column::initial(100.0)
-                                                            .at_least(40.0)
-                                                            .at_most(400.0),
-                                                    )
-                                                    .min_scrolled_height(10.0);
-                    
-                                                table
-                                                    .header(20.0, |mut header| {
-                                                        header.col(|ui| {
-                                                            ui.strong("");
-                                                        });
-                                                        header.col(|ui| {
-                                                            ui.strong("Key");
-                                                        });
-                                                        header.col(|ui| {
-                                                            ui.strong("Value");
-                                                        });
-                                                    })
-                                                    .body(|mut body| {
-                                                        http_config.request_body_form.retain_mut(|el| {
-                                                            let mut r = true;
-                    
-                                                            body.row(30.0, |mut row| {
-                                                                row.col(|ui| {
-                                                                    ui.checkbox(&mut el.disable, "");
-                                                                });
-                    
-                                                                row.col(|ui| {
-                                                                    ui.add(
-                                                                        egui::TextEdit::singleline(&mut el.key)
-                                                                            .desired_width(f32::INFINITY),
-                                                                    );
-                                                                });
-                    
-                                                                row.col(|ui| {
-                                                                    ui.add(
-                                                                        egui::TextEdit::singleline(&mut el.value)
-                                                                            .desired_width(f32::INFINITY),
-                                                                    );
-                                                                });
-                    
-                                                                row.col(|ui| {
-                                                                    if ui.button("删除").clicked() {
-                                                                        r = false;
-                                                                    }
-                                                                });
+                            }
+        
+                            RequestBodyTab::Form => {
+                                ui.vertical(|ui| {
+                                    if ui.button("添加").clicked() {
+                                        http_config.request_body_form.push(PairUi::default());
+                                    }
+                                });
+                        
+                                ui.separator();
+                        
+                                egui_extras::StripBuilder::new(ui)
+                                    .size(egui_extras::Size::remainder().at_least(50.0).at_most(120.0))
+                                    .vertical(|mut strip| {
+                                        strip.cell(|ui| {
+                                            egui::ScrollArea::vertical()
+                                                .id_source("body_form scroll")
+                                                .show(ui, |ui| {
+                                                    let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
+                        
+                                                    let mut table = egui_extras::TableBuilder::new(ui)
+                                                        .striped(true)
+                                                        .resizable(true)
+                                                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                                                        .column(egui_extras::Column::auto())
+                                                        .column(
+                                                            egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
+                                                                .range(100.0..=400.0),
+                                                        )
+                                                        .column(
+                                                            egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
+                                                                .range(100.0..=400.0),
+                                                        )
+                                                        .column(
+                                                            egui_extras::Column::initial(100.0)
+                                                                .at_least(40.0)
+                                                                .at_most(400.0),
+                                                        )
+                                                        .min_scrolled_height(10.0);
+                        
+                                                    table
+                                                        .header(20.0, |mut header| {
+                                                            header.col(|ui| {
+                                                                ui.strong("");
                                                             });
-                                                            r
-                                                        });
-                                                    })
-                                            });
-                                    });
-                                });
-                        }
-    
-                        RequestBodyTab::FormData => {
-                            ui.vertical(|ui| {
-                                if ui.button("添加").clicked() {
-                                    http_config
-                                        .request_body_form_data
-                                        .push(PairUi::default());
-                                }
-                            });
-                    
-                            ui.separator();
-                    
-                            egui_extras::StripBuilder::new(ui)
-                                .size(egui_extras::Size::remainder().at_least(50.0).at_most(120.0))
-                                .vertical(|mut strip| {
-                                    strip.cell(|ui| {
-                                        egui::ScrollArea::vertical()
-                                            .id_source("body_form_data scroll")
-                                            .show(ui, |ui| {
-                                                let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
-                    
-                                                let mut table = egui_extras::TableBuilder::new(ui)
-                                                    .striped(true)
-                                                    .resizable(true)
-                                                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                                                    .column(egui_extras::Column::auto())
-                                                    .column(
-                                                        egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
-                                                            .range(100.0..=400.0),
-                                                    )
-                                                    .column(
-                                                        egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
-                                                            .range(100.0..=400.0),
-                                                    )
-                                                    .column(
-                                                        egui_extras::Column::initial(100.0)
-                                                            .at_least(40.0)
-                                                            .at_most(400.0),
-                                                    )
-                                                    .min_scrolled_height(10.0);
-                    
-                                                table
-                                                    .header(20.0, |mut header| {
-                                                        header.col(|ui| {
-                                                            ui.strong("");
-                                                        });
-                                                        header.col(|ui| {
-                                                            ui.strong("Key");
-                                                        });
-                                                        header.col(|ui| {
-                                                            ui.strong("Value");
-                                                        });
-                                                    })
-                                                    .body(|mut body| {
-                                                        http_config.request_body_form_data.retain_mut(|el| {
-                                                            let mut r = true;
-                    
-                                                            body.row(30.0, |mut row| {
-                                                                row.col(|ui| {
-                                                                    ui.checkbox(&mut el.disable, "");
-                                                                });
-                    
-                                                                row.col(|ui| {
-                                                                    ui.add(
-                                                                        egui::TextEdit::singleline(&mut el.key)
-                                                                            .desired_width(f32::INFINITY),
-                                                                    );
-                                                                });
-                    
-                                                                row.col(|ui| {
-                                                                    ui.add(
-                                                                        egui::TextEdit::singleline(&mut el.value)
-                                                                            .desired_width(f32::INFINITY),
-                                                                    );
-                                                                });
-                    
-                                                                row.col(|ui| {
-                                                                    if ui.button("删除").clicked() {
-                                                                        r = false;
-                                                                    }
-                                                                });
+                                                            header.col(|ui| {
+                                                                ui.strong("Key");
                                                             });
-                                                            r
-                                                        });
-                                                    })
-                                            });
+                                                            header.col(|ui| {
+                                                                ui.strong("Value");
+                                                            });
+                                                        })
+                                                        .body(|mut body| {
+                                                            http_config.request_body_form.retain_mut(|el| {
+                                                                let mut r = true;
+                        
+                                                                body.row(30.0, |mut row| {
+                                                                    row.col(|ui| {
+                                                                        ui.checkbox(&mut el.disable, "");
+                                                                    });
+                        
+                                                                    row.col(|ui| {
+                                                                        ui.add(
+                                                                            egui::TextEdit::singleline(&mut el.key)
+                                                                                .desired_width(f32::INFINITY),
+                                                                        );
+                                                                    });
+                        
+                                                                    row.col(|ui| {
+                                                                        ui.add(
+                                                                            egui::TextEdit::singleline(&mut el.value)
+                                                                                .desired_width(f32::INFINITY),
+                                                                        );
+                                                                    });
+                        
+                                                                    row.col(|ui| {
+                                                                        if ui.button("删除").clicked() {
+                                                                            r = false;
+                                                                        }
+                                                                    });
+                                                                });
+                                                                r
+                                                            });
+                                                        })
+                                                });
+                                        });
                                     });
+                            }
+        
+                            RequestBodyTab::FormData => {
+                                ui.vertical(|ui| {
+                                    if ui.button("添加").clicked() {
+                                        http_config
+                                            .request_body_form_data
+                                            .push(PairUi::default());
+                                    }
                                 });
-                        }
-    
-                        _ => {
-                            println!("??");
+                        
+                                ui.separator();
+                        
+                                egui_extras::StripBuilder::new(ui)
+                                    .size(egui_extras::Size::remainder().at_least(50.0).at_most(120.0))
+                                    .vertical(|mut strip| {
+                                        strip.cell(|ui| {
+                                            egui::ScrollArea::vertical()
+                                                .id_source("body_form_data scroll")
+                                                .show(ui, |ui| {
+                                                    let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
+                        
+                                                    let mut table = egui_extras::TableBuilder::new(ui)
+                                                        .striped(true)
+                                                        .resizable(true)
+                                                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                                                        .column(egui_extras::Column::auto())
+                                                        .column(
+                                                            egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
+                                                                .range(100.0..=400.0),
+                                                        )
+                                                        .column(
+                                                            egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
+                                                                .range(100.0..=400.0),
+                                                        )
+                                                        .column(
+                                                            egui_extras::Column::initial(100.0)
+                                                                .at_least(40.0)
+                                                                .at_most(400.0),
+                                                        )
+                                                        .min_scrolled_height(10.0);
+                        
+                                                    table
+                                                        .header(20.0, |mut header| {
+                                                            header.col(|ui| {
+                                                                ui.strong("");
+                                                            });
+                                                            header.col(|ui| {
+                                                                ui.strong("Key");
+                                                            });
+                                                            header.col(|ui| {
+                                                                ui.strong("Value");
+                                                            });
+                                                        })
+                                                        .body(|mut body| {
+                                                            http_config.request_body_form_data.retain_mut(|el| {
+                                                                let mut r = true;
+                        
+                                                                body.row(30.0, |mut row| {
+                                                                    row.col(|ui| {
+                                                                        ui.checkbox(&mut el.disable, "");
+                                                                    });
+                        
+                                                                    row.col(|ui| {
+                                                                        ui.add(
+                                                                            egui::TextEdit::singleline(&mut el.key)
+                                                                                .desired_width(f32::INFINITY),
+                                                                        );
+                                                                    });
+                        
+                                                                    row.col(|ui| {
+                                                                        ui.add(
+                                                                            egui::TextEdit::singleline(&mut el.value)
+                                                                                .desired_width(f32::INFINITY),
+                                                                        );
+                                                                    });
+                        
+                                                                    row.col(|ui| {
+                                                                        if ui.button("删除").clicked() {
+                                                                            r = false;
+                                                                        }
+                                                                    });
+                                                                });
+                                                                r
+                                                            });
+                                                        })
+                                                });
+                                        });
+                                    });
+                            }
+        
+                            _ => {
+                                println!("??");
+                            }
                         }
                     }
-                }
-                _ => {
-                    panic!("?? req_tab_idx");
-                }
-            };
+                    _ => {
+                        panic!("?? req_tab_idx");
+                    }
+                };
 
-            ui.separator();
+                ui.separator();
 
-            if let Some(response_promise) = &http_config.response_promise {
-                match response_promise.ready() {
-                    Some(response_r) => match response_r {
-                        Ok(response) => {
-                            ui.horizontal(|ui| {
-                                ui.heading("Response Status:");
+                if let Some(response_promise) = &http_config.response_promise {
+                    match response_promise.ready() {
+                        Some(response_r) => match response_r {
+                            Ok(response) => {
+                                ui.horizontal(|ui| {
+                                    ui.heading("Response Status:");
 
-                                ui.label(format!("{}", response.status));
+                                    ui.label(format!("{}", response.status));
 
-                                if let Some(remote_addr) = &response.remote_addr {
-                                    ui.label(format!("{}", remote_addr));
-                                };
-                            });
-                            ui.separator();
+                                    if let Some(remote_addr) = &response.remote_addr {
+                                        ui.label(format!("{}", remote_addr));
+                                    };
+                                });
+                                ui.separator();
 
-                            ui.horizontal(|ui| {
-                                for (i, label) in RESPONSE_TABS.iter().enumerate() {
-                                    ui.selectable_value(
-                                        &mut http_config.response_tab,
-                                        label.to_owned(),
-                                        label.as_ref(),
-                                    );
-                                }
-                            });
-                            ui.separator();
+                                ui.horizontal(|ui| {
+                                    for (i, label) in RESPONSE_TABS.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut http_config.response_tab,
+                                            label.to_owned(),
+                                            label.as_ref(),
+                                        );
+                                    }
+                                });
+                                ui.separator();
 
-                            match http_config.response_tab {
-                                ResponseTab::Data => {
-                                    ui.horizontal(|ui| {
-                                        if let Some(data_vec) = &response.data_vec {
-                                            if let Some(text_data) = &response.data {
-                                                if ui.button("复制到剪切板").clicked() {
-                                                    ui.output_mut(|o| {
-                                                        o.copied_text = text_data.clone()
-                                                    });
-                                                };
-                                            };
-
-                                            ui.separator();
-
-                                            ui.add(
-                                                egui::TextEdit::singleline(
-                                                    &mut http_config
-                                                        .response_data_download_path,
-                                                )
-                                                .hint_text(r#"c:\o.jpg"#),
-                                            );
-                                            if ui
-                                                .add_enabled(
-                                                    !http_config
-                                                        .response_data_download_path
-                                                        .is_empty(),
-                                                    egui::Button::new("下载"),
-                                                )
-                                                .clicked()
-                                            {
-                                                let download_path =  http_config
-                                                    .response_data_download_path
-                                                    .clone();
-
-                                                let p = std::path::Path::new(&download_path);
-                                                let p_dir = p.parent();
-
-                                                if let Some(p_dir) = p_dir {
-                                                    if p_dir.is_dir() && p_dir.exists() {
-                                                        let contents: Vec<u8> = data_vec.clone();
-                                                        self.rt.spawn(async move {
-                                                            let contents: &[u8] = contents.as_ref();
-                                                            if let Err(err) = tokio::fs::write(
-                                                                &download_path,
-                                                                contents,
-                                                            )
-                                                            .await
-                                                            {
-                                                                println!(
-                                                                    "download error: {}",
-                                                                    err.to_string()
-                                                                );
-                                                            };
+                                match http_config.response_tab {
+                                    ResponseTab::Data => {
+                                        ui.horizontal(|ui| {
+                                            if let Some(data_vec) = &response.data_vec {
+                                                if let Some(text_data) = &response.data {
+                                                    if ui.button("复制到剪切板").clicked() {
+                                                        ui.output_mut(|o| {
+                                                            o.copied_text = text_data.clone()
                                                         });
+                                                    };
+                                                };
+
+                                                ui.separator();
+
+                                                ui.add(
+                                                    egui::TextEdit::singleline(
+                                                        &mut http_config
+                                                            .response_data_download_path,
+                                                    )
+                                                    .hint_text(r#"c:\o.jpg"#),
+                                                );
+                                                if ui
+                                                    .add_enabled(
+                                                        !http_config
+                                                            .response_data_download_path
+                                                            .is_empty(),
+                                                        egui::Button::new("下载"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    let download_path =  http_config
+                                                        .response_data_download_path
+                                                        .clone();
+
+                                                    let p = std::path::Path::new(&download_path);
+                                                    let p_dir = p.parent();
+
+                                                    if let Some(p_dir) = p_dir {
+                                                        if p_dir.is_dir() && p_dir.exists() {
+                                                            let contents: Vec<u8> = data_vec.clone();
+                                                            self.rt.spawn(async move {
+                                                                let contents: &[u8] = contents.as_ref();
+                                                                if let Err(err) = tokio::fs::write(
+                                                                    &download_path,
+                                                                    contents,
+                                                                )
+                                                                .await
+                                                                {
+                                                                    println!(
+                                                                        "download error: {}",
+                                                                        err.to_string()
+                                                                    );
+                                                                };
+                                                            });
+                                                        }
                                                     }
                                                 }
                                             }
-                                        }
-                                    });
+                                        });
 
-                                    if let Some(img_data) = &response.img {
-                                        match img_data {
-                                            Ok(image) => {
-                                                image.show_max_size(
-                                                    ui,
-                                                    [IMAGE_MAX_WIDTH, IMAGE_MAX_WIDTH].into(),
-                                                );
+                                        if let Some(img_data) = &response.img {
+                                            match img_data {
+                                                Ok(image) => {
+                                                    image.show_max_size(
+                                                        ui,
+                                                        [IMAGE_MAX_WIDTH, IMAGE_MAX_WIDTH].into(),
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    ui.label(err.as_str());
+                                                }
                                             }
-                                            Err(err) => {
-                                                ui.label(err.as_str());
-                                            }
+                                        } else if let Some(text_data) = &response.data {
+                                            egui::ScrollArea::vertical()
+                                                .id_source("data scroll")
+                                                .always_show_scroll(true)
+                                                .auto_shrink([false, false])
+                                                .show(ui, |ui| {
+                                                    ui.label(text_data);
+                                                });
+                                        } else {
+                                            widget::error_label(ui, "其他类型");
                                         }
-                                    } else if let Some(text_data) = &response.data {
-                                        egui::ScrollArea::vertical()
-                                            .id_source("data scroll")
-                                            .always_show_scroll(true)
-                                            .auto_shrink([false, false])
-                                            .show(ui, |ui| {
-                                                ui.label(text_data);
+                                    }
+
+                                    ResponseTab::Header => {
+                                        egui::Grid::new("response header").show(ui, |ui| {
+                                            response.headers.iter().for_each(|(name, val)| {
+                                                ui.label(name.as_str());
+                                                ui.label(val.to_str().unwrap_or(""));
+                                                ui.end_row();
                                             });
-                                    } else {
-                                        widget::error_label(ui, "其他类型");
+                                        });
+                                    }
+
+                                    _ => {
+                                        todo!();
                                     }
                                 }
-
-                                ResponseTab::Header => {
-                                    egui::Grid::new("response header").show(ui, |ui| {
-                                        response.headers.iter().for_each(|(name, val)| {
-                                            ui.label(name.as_str());
-                                            ui.label(val.to_str().unwrap_or(""));
-                                            ui.end_row();
-                                        });
-                                    });
-                                }
-
-                                _ => {
-                                    todo!();
-                                }
                             }
+                            Err(err) => {
+                                widget::error_label(ui, &err.to_string());
+                            }
+                        },
+                        _ => {
+                            ui.spinner();
                         }
-                        Err(err) => {
-                            widget::error_label(ui, &err.to_string());
-                        }
-                    },
-                    _ => {
-                        ui.spinner();
                     }
-                }
-            };
-        });
-    }
+                };
+            });
+        }
     }
 }
 
@@ -875,8 +930,7 @@ impl HttpConfig {
         let (sender, response_promise) = Promise::new();
         self.response_promise = Some(response_promise);
 
-        let method =
-            reqwest::Method::from_bytes(self.method.as_ref().as_bytes()).unwrap();
+        let method = reqwest::Method::from_bytes(self.method.as_ref().as_bytes()).unwrap();
 
         let url: String = self.url.clone();
 
@@ -894,7 +948,7 @@ impl HttpConfig {
             .filter_map(|el| el.pair())
             .collect();
 
-        let request_body_form: Vec<(String, String)> =  self
+        let request_body_form: Vec<(String, String)> = self
             .request_body_form
             .clone()
             .into_iter()
@@ -913,7 +967,7 @@ impl HttpConfig {
         let body_raw = self.request_body_raw.clone();
 
         tokio::task::spawn(async move {
-        // self.rt.spawn(async move {
+            // self.rt.spawn(async move {
             let mut client = reqwest::Client::new();
             let mut request_builder = client.request(method, &url);
 
@@ -936,7 +990,8 @@ impl HttpConfig {
                         match body_raw_type_idx {
                             RequestBodyRawType::Text => {
                                 if !has_content_type {
-                                    request_builder = request_builder.header("Content-Type", "text/plain");
+                                    request_builder =
+                                        request_builder.header("Content-Type", "text/plain");
                                 }
 
                                 request_builder = request_builder.body(body_raw);
@@ -944,7 +999,8 @@ impl HttpConfig {
 
                             RequestBodyRawType::Json => {
                                 if !has_content_type {
-                                    request_builder = request_builder.header("Content-Type", "application/json");
+                                    request_builder =
+                                        request_builder.header("Content-Type", "application/json");
                                 }
 
                                 request_builder = request_builder.body(body_raw);
@@ -952,7 +1008,10 @@ impl HttpConfig {
 
                             RequestBodyRawType::Form => {
                                 if !has_content_type {
-                                    request_builder = request_builder.header("Content-Type", "application/x-www-form-urlencoded");
+                                    request_builder = request_builder.header(
+                                        "Content-Type",
+                                        "application/x-www-form-urlencoded",
+                                    );
                                 }
 
                                 request_builder = request_builder.body(body_raw);
@@ -960,7 +1019,8 @@ impl HttpConfig {
 
                             RequestBodyRawType::XML => {
                                 if !has_content_type {
-                                    request_builder = request_builder.header("Content-Type", "text/xml");
+                                    request_builder =
+                                        request_builder.header("Content-Type", "text/xml");
                                 }
 
                                 request_builder = request_builder.body(body_raw);
@@ -980,7 +1040,8 @@ impl HttpConfig {
                                 };
 
                                 if !has_content_type {
-                                    request_builder = request_builder.header("Content-Type", "application/octet-stream");
+                                    request_builder = request_builder
+                                        .header("Content-Type", "application/octet-stream");
                                 }
 
                                 request_builder = request_builder.body(dat);
@@ -992,7 +1053,9 @@ impl HttpConfig {
                 }
 
                 RequestBodyTab::Form => {
-                    request_builder = request_builder.header("Content-Type", "application/x-www-form-urlencoded").form( &request_body_form );
+                    request_builder = request_builder
+                        .header("Content-Type", "application/x-www-form-urlencoded")
+                        .form(&request_body_form);
                 }
 
                 RequestBodyTab::FormData => {
@@ -1001,9 +1064,13 @@ impl HttpConfig {
                     // name  bar
                     // file  @a.jpg
                     // files @a.jpg @b.jpg
-                    for (k, v) in request_body_form_data  {
+                    for (k, v) in request_body_form_data {
                         if !v.is_empty() && v.contains('@') {
-                            let filepaths: Vec<_> = v.split('@').filter(|e| !e.is_empty()).map(|e| e.trim()).collect();
+                            let filepaths: Vec<_> = v
+                                .split('@')
+                                .filter(|e| !e.is_empty())
+                                .map(|e| e.trim())
+                                .collect();
                             for filepath in filepaths {
                                 let upload_file_path_p = std::path::Path::new(filepath);
 
@@ -1017,15 +1084,17 @@ impl HttpConfig {
                                     return;
                                 };
 
-                                form =  form.part(k.clone(), reqwest::multipart::Part::bytes(file_body).file_name(filename));
+                                form = form.part(
+                                    k.clone(),
+                                    reqwest::multipart::Part::bytes(file_body).file_name(filename),
+                                );
                             }
                         } else {
-                            form =  form.text(k.clone(), v);
+                            form = form.text(k.clone(), v);
                         }
                     }
 
                     request_builder = request_builder.multipart(form);
-
                 }
 
                 _ => todo!(),
@@ -1033,7 +1102,7 @@ impl HttpConfig {
 
             let response = match request_builder.send().await {
                 Ok(r) => r,
-                 Err(err) => {
+                Err(err) => {
                     sender.send(Err(anyhow!(err)));
                     return;
                 }
