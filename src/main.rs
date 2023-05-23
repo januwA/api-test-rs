@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 
 use anyhow::anyhow;
 use eframe::egui::output::OpenUrl;
+use eframe::egui::TextBuffer;
 use eframe::epaint::vec2;
 use eframe::{
     egui::{self, Hyperlink, RichText, Ui},
@@ -22,25 +23,35 @@ mod cache;
 mod util;
 mod widget;
 
-const K_IMAGE_MAX_WIDTH: f32 = 200.0;
-const K_REQ_METHODS: [reqwest::Method; 8] = [
-    reqwest::Method::GET,
-    reqwest::Method::POST,
-    reqwest::Method::PUT,
-    reqwest::Method::DELETE,
-    reqwest::Method::HEAD,
-    reqwest::Method::OPTIONS,
-    reqwest::Method::CONNECT,
-    reqwest::Method::TRACE,
+/* #region const variables */
+const IMAGE_MAX_WIDTH: f32 = 200.0;
+const METHODS: [Method; 9] = [
+    Method::GET,
+    Method::POST,
+    Method::PUT,
+    Method::DELETE,
+    Method::HEAD,
+    Method::OPTIONS,
+    Method::CONNECT,
+    Method::TRACE,
+    Method::PATCH,
 ];
-const K_REQ_TABS: [RequestTab; 3] = [RequestTab::Params, RequestTab::Headers, RequestTab::Body];
-const K_REQ_BODY_TABS: [&str; 3] = ["Raw", "Form", "form-data"];
-/// binary 输入文件路径
-const K_REQ_BODY_RAW_TYPES: [&str; 5] = ["text", "json", "form", "xml", "binary file"];
-
-const K_COLUMN_WIDTH_INITIAL: f32 = 200.0;
-
-const K_RESPONSE_TABS: [&str; 2] = ["Data", "Header"];
+const REQ_TABS: [RequestTab; 3] = [RequestTab::Params, RequestTab::Headers, RequestTab::Body];
+const REQ_BODY_TABS: [RequestBodyTab; 3] = [
+    RequestBodyTab::Raw,
+    RequestBodyTab::Form,
+    RequestBodyTab::FormData,
+];
+const REQ_BODY_RAW_TYPES: [RequestBodyRawType; 5] = [
+    RequestBodyRawType::Json,
+    RequestBodyRawType::Text,
+    RequestBodyRawType::Form,
+    RequestBodyRawType::XML,
+    RequestBodyRawType::BinaryFile,
+];
+const COLUMN_WIDTH_INITIAL: f32 = 200.0;
+const RESPONSE_TABS: [ResponseTab; 2] = [ResponseTab::Data, ResponseTab::Header];
+/* #endregion */
 
 fn main() -> Result<(), eframe::Error> {
     env_logger::init();
@@ -48,7 +59,7 @@ fn main() -> Result<(), eframe::Error> {
     options.icon_data = Some(util::load_app_icon());
 
     // options.initial_window_pos = Some([0f32, 0f32].into());
-    options.min_window_size = Some([1400.0, 800.0].into());
+    options.min_window_size = Some([900.0, 600.0].into());
 
     // options.fullscreen = true;
     options.maximized = false;
@@ -60,51 +71,7 @@ fn main() -> Result<(), eframe::Error> {
     )
 }
 
-#[derive(Serialize, Deserialize)]
-struct HttpConfig {
-    method_idx: usize,
-    url: String,
-
-    request_tab: RequestTab,
-    request_body_tab_idx: usize,
-
-    request_query: Vec<PairUi>,
-    request_header: Vec<PairUi>,
-    request_body_form: Vec<PairUi>,
-    request_body_form_data: Vec<PairUi>,
-    request_body_raw: String,
-    request_body_raw_type_idx: usize,
-
-    #[serde(skip)]
-    response_promise: Option<Promise<anyhow::Result<HttpResponse>>>,
-
-    #[serde(skip)]
-    response_data_download_path: String,
-
-    #[serde(skip)]
-    response_tab_idx: usize,
-}
-
-impl Default for HttpConfig {
-    fn default() -> Self {
-        Self {
-            method_idx: Default::default(),
-            url: "http://127.0.0.1:3000/ping".to_string(),
-            request_body_tab_idx: Default::default(),
-            request_body_raw: Default::default(),
-            response_promise: Default::default(),
-            response_data_download_path: Default::default(),
-            request_body_raw_type_idx: Default::default(),
-            request_query: vec![PairUi::default()],
-            request_header: vec![PairUi::default()],
-            request_body_form: vec![PairUi::default()],
-            request_body_form_data: vec![PairUi::default()],
-            request_tab: RequestTab::Params,
-            response_tab_idx: Default::default(),
-        }
-    }
-}
-
+/* #region App */
 struct ApiTestApp {
     http_config: HttpConfig,
     rt: Runtime,
@@ -133,14 +100,14 @@ impl ApiTestApp {
         util::setup_custom_fonts(&cc.egui_ctx);
         Self::default()
     }
-}
 
-impl ApiTestApp {
     fn http_send(&mut self) {
         let (sender, response_promise) = Promise::new();
         self.http_config.response_promise = Some(response_promise);
 
-        let method = K_REQ_METHODS[self.http_config.method_idx].clone();
+        let method =
+            reqwest::Method::from_bytes(self.http_config.method.as_ref().as_bytes()).unwrap();
+
         let url: String = self.http_config.url.clone();
 
         let request_query: Vec<(String, String)> = self
@@ -175,8 +142,8 @@ impl ApiTestApp {
             .filter_map(|el| el.pair())
             .collect();
 
-        let req_body_tab_idx = self.http_config.request_body_tab_idx;
-        let body_raw_type_idx = self.http_config.request_body_raw_type_idx;
+        let req_body_tab_idx = self.http_config.request_body_tab.to_owned();
+        let body_raw_type_idx = self.http_config.request_body_raw_type.to_owned();
         let body_raw = self.http_config.request_body_raw.clone();
 
         self.rt.spawn(async move {
@@ -197,12 +164,10 @@ impl ApiTestApp {
 
             // add body
             match req_body_tab_idx {
-                // Raw
-                0 => {
+                RequestBodyTab::Raw => {
                     if !body_raw.is_empty() {
                         match body_raw_type_idx {
-                            // text
-                            0 => {
+                            RequestBodyRawType::Text => {
                                 if !has_content_type {
                                     request_builder = request_builder.header("Content-Type", "text/plain");
                                 }
@@ -210,8 +175,7 @@ impl ApiTestApp {
                                 request_builder = request_builder.body(body_raw);
                             }
 
-                            // json
-                            1 => {
+                            RequestBodyRawType::Json => {
                                 if !has_content_type {
                                     request_builder = request_builder.header("Content-Type", "application/json");
                                 }
@@ -219,8 +183,7 @@ impl ApiTestApp {
                                 request_builder = request_builder.body(body_raw);
                             }
 
-                            // form
-                            2 => {
+                            RequestBodyRawType::Form => {
                                 if !has_content_type {
                                     request_builder = request_builder.header("Content-Type", "application/x-www-form-urlencoded");
                                 }
@@ -228,8 +191,7 @@ impl ApiTestApp {
                                 request_builder = request_builder.body(body_raw);
                             }
 
-                            // xml
-                            3 => {
+                            RequestBodyRawType::XML => {
                                 if !has_content_type {
                                     request_builder = request_builder.header("Content-Type", "text/xml");
                                 }
@@ -237,8 +199,7 @@ impl ApiTestApp {
                                 request_builder = request_builder.body(body_raw);
                             }
 
-                            // binary file
-                            4 => {
+                            RequestBodyRawType::BinaryFile => {
                                 let binary_file_path = &body_raw;
 
                                 if !std::path::Path::new(binary_file_path).exists() {
@@ -263,13 +224,11 @@ impl ApiTestApp {
                     }
                 }
 
-                // Form
-                1 => {
+                RequestBodyTab::Form => {
                     request_builder = request_builder.header("Content-Type", "application/x-www-form-urlencoded").form( &request_body_form );
                 }
 
-                // form-data
-                2 => {
+                RequestBodyTab::FormData => {
                     let mut form = reqwest::multipart::Form::new();
 
                     // name  bar
@@ -354,16 +313,12 @@ impl ApiTestApp {
     }
 }
 
-/* #region MyApp panel */
 impl ApiTestApp {
     fn tabs_panel(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
-            for (i, label) in K_REQ_TABS.iter().enumerate() {
-                ui.selectable_value(
-                    &mut self.http_config.request_tab,
-                    label.clone(),
-                    label.to_string(),
-                );
+            for (i, label) in REQ_TABS.iter().enumerate() {
+                let text = label.as_ref();
+                ui.selectable_value(&mut self.http_config.request_tab, label.to_owned(), text);
             }
         });
     }
@@ -392,11 +347,11 @@ impl ApiTestApp {
                                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                                 .column(egui_extras::Column::auto())
                                 .column(
-                                    egui_extras::Column::initial(K_COLUMN_WIDTH_INITIAL)
+                                    egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
                                         .range(100.0..=400.0),
                                 )
                                 .column(
-                                    egui_extras::Column::initial(K_COLUMN_WIDTH_INITIAL)
+                                    egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
                                         .range(100.0..=400.0),
                                 )
                                 .column(
@@ -477,8 +432,8 @@ impl ApiTestApp {
                             .resizable(true)
                             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                             .column(egui_extras::Column::auto())
-                            .column(egui_extras::Column::initial(K_COLUMN_WIDTH_INITIAL).range(100.0..=400.0))
-                            .column(egui_extras::Column::initial(K_COLUMN_WIDTH_INITIAL).range(100.0..=400.0))
+                            .column(egui_extras::Column::initial(COLUMN_WIDTH_INITIAL).range(100.0..=400.0))
+                            .column(egui_extras::Column::initial(COLUMN_WIDTH_INITIAL).range(100.0..=400.0))
                             .column(egui_extras::Column::initial(100.0).at_least(40.0).at_most(400.0))
                             // .column(egui_extras::Column::initial(100.0).range(40.0..=300.0))
                             // .column( egui_extras::Column::initial(100.0).at_least(40.0), )
@@ -541,11 +496,11 @@ impl ApiTestApp {
         ui.vertical(|ui| {
             ui.group(|ui| {
                 ui.horizontal(|ui| {
-                    for (i, raw_type) in K_REQ_BODY_RAW_TYPES.iter().enumerate() {
+                    for (i, raw_type) in REQ_BODY_RAW_TYPES.iter().enumerate() {
                         ui.radio_value(
-                            &mut self.http_config.request_body_raw_type_idx,
-                            i,
+                            &mut self.http_config.request_body_raw_type,
                             raw_type.to_owned(),
+                            raw_type.as_ref(),
                         );
                     }
                 });
@@ -587,11 +542,11 @@ impl ApiTestApp {
                                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                                 .column(egui_extras::Column::auto())
                                 .column(
-                                    egui_extras::Column::initial(K_COLUMN_WIDTH_INITIAL)
+                                    egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
                                         .range(100.0..=400.0),
                                 )
                                 .column(
-                                    egui_extras::Column::initial(K_COLUMN_WIDTH_INITIAL)
+                                    egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
                                         .range(100.0..=400.0),
                                 )
                                 .column(
@@ -676,11 +631,11 @@ impl ApiTestApp {
                                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                                 .column(egui_extras::Column::auto())
                                 .column(
-                                    egui_extras::Column::initial(K_COLUMN_WIDTH_INITIAL)
+                                    egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
                                         .range(100.0..=400.0),
                                 )
                                 .column(
-                                    egui_extras::Column::initial(K_COLUMN_WIDTH_INITIAL)
+                                    egui_extras::Column::initial(COLUMN_WIDTH_INITIAL)
                                         .range(100.0..=400.0),
                                 )
                                 .column(
@@ -749,28 +704,25 @@ impl ApiTestApp {
             }
             RequestTab::Body => {
                 ui.horizontal(|ui| {
-                    for (i, label) in K_REQ_BODY_TABS.iter().enumerate() {
+                    for (i, label) in REQ_BODY_TABS.iter().enumerate() {
                         ui.selectable_value(
-                            &mut self.http_config.request_body_tab_idx,
-                            i,
+                            &mut self.http_config.request_body_tab,
                             label.to_owned(),
+                            label.as_ref(),
                         );
                     }
                 });
                 ui.painter();
-                match self.http_config.request_body_tab_idx {
-                    // row
-                    0 => {
+                match self.http_config.request_body_tab {
+                    RequestBodyTab::Raw => {
                         self.req_body_raw_panel(ui, ctx);
                     }
 
-                    // Form
-                    1 => {
+                    RequestBodyTab::Form => {
                         self.req_body_form_panel(ui, ctx);
                     }
 
-                    // form-data
-                    2 => {
+                    RequestBodyTab::FormData => {
                         self.req_body_form_data_panel(ui, ctx);
                     }
 
@@ -801,11 +753,16 @@ impl ApiTestApp {
                         frame.close();
                     }
                 });
+
+                ui.menu_button("Test Request", |ui| {
+                    if ui.button("Add").clicked() {
+                       todo!("add ad request")
+                    }
+                });
             });
         });
     }
 }
-/* #endregion */
 
 impl eframe::App for ApiTestApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -851,27 +808,32 @@ impl eframe::App for ApiTestApp {
                 });
             });
 
-        egui::SidePanel::right("right_panel")
-            .resizable(true)
-            .default_width(150.0)
-            .width_range(80.0..=200.0)
-            .show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.heading("Right Panel");
-                });
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.label("text");
-                });
-            });
+        // egui::SidePanel::right("right_panel")
+        //     .resizable(true)
+        //     .default_width(150.0)
+        //     .width_range(80.0..=200.0)
+        //     .show(ctx, |ui| {
+        //         ui.vertical_centered(|ui| {
+        //             ui.heading("Right Panel");
+        //         });
+        //         egui::ScrollArea::vertical().show(ui, |ui| {
+        //             ui.label("text");
+        //         });
+        //     });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
-                egui::ComboBox::from_id_source("method").show_index(
-                    ui,
-                    &mut self.http_config.method_idx,
-                    K_REQ_METHODS.len(),
-                    |i| K_REQ_METHODS[i].to_string(),
-                );
+                egui::ComboBox::from_id_source("method")
+                    .selected_text(self.http_config.method.as_ref())
+                    .show_ui(ui, |ui| {
+                        for m in &METHODS {
+                            ui.selectable_value(
+                                &mut self.http_config.method,
+                                m.to_owned(),
+                                m.as_ref(),
+                            );
+                        }
+                    });
 
                 ui.add(egui::TextEdit::singleline(&mut self.http_config.url).desired_width(500.));
 
@@ -907,19 +869,18 @@ impl eframe::App for ApiTestApp {
                             ui.separator();
 
                             ui.horizontal(|ui| {
-                                for (i, label) in K_RESPONSE_TABS.iter().enumerate() {
+                                for (i, label) in RESPONSE_TABS.iter().enumerate() {
                                     ui.selectable_value(
-                                        &mut self.http_config.response_tab_idx,
-                                        i,
+                                        &mut self.http_config.response_tab,
                                         label.to_owned(),
+                                        label.as_ref(),
                                     );
                                 }
                             });
                             ui.separator();
 
-                            match self.http_config.response_tab_idx {
-                                // Data
-                                0 => {
+                            match self.http_config.response_tab {
+                                ResponseTab::Data => {
                                     ui.horizontal(|ui| {
                                         if let Some(data_vec) = &response.data_vec {
                                             if let Some(text_data) = &response.data {
@@ -986,7 +947,7 @@ impl eframe::App for ApiTestApp {
                                             Ok(image) => {
                                                 image.show_max_size(
                                                     ui,
-                                                    [K_IMAGE_MAX_WIDTH, K_IMAGE_MAX_WIDTH].into(),
+                                                    [IMAGE_MAX_WIDTH, IMAGE_MAX_WIDTH].into(),
                                                 );
                                             }
                                             Err(err) => {
@@ -1006,8 +967,7 @@ impl eframe::App for ApiTestApp {
                                     }
                                 }
 
-                                // Header
-                                1 => {
+                                ResponseTab::Header => {
                                     egui::Grid::new("response header").show(ui, |ui| {
                                         response.headers.iter().for_each(|(name, val)| {
                                             ui.label(name.as_str());
@@ -1032,6 +992,55 @@ impl eframe::App for ApiTestApp {
                 }
             };
         });
+    }
+}
+
+/* #endregion */
+
+/* #region other */
+
+#[derive(Serialize, Deserialize)]
+struct HttpConfig {
+    method: Method,
+    url: String,
+
+    request_tab: RequestTab,
+    request_body_tab: RequestBodyTab,
+
+    request_query: Vec<PairUi>,
+    request_header: Vec<PairUi>,
+    request_body_form: Vec<PairUi>,
+    request_body_form_data: Vec<PairUi>,
+    request_body_raw: String,
+    request_body_raw_type: RequestBodyRawType,
+
+    #[serde(skip)]
+    response_promise: Option<Promise<anyhow::Result<HttpResponse>>>,
+
+    #[serde(skip)]
+    response_data_download_path: String,
+
+    #[serde(skip)]
+    response_tab: ResponseTab,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            method: Method::GET,
+            url: "http://127.0.0.1:3000/ping".to_string(),
+            request_body_tab: RequestBodyTab::Raw,
+            request_body_raw: Default::default(),
+            response_promise: Default::default(),
+            response_data_download_path: Default::default(),
+            request_body_raw_type: RequestBodyRawType::Json,
+            request_query: vec![PairUi::default()],
+            request_header: vec![PairUi::default()],
+            request_body_form: vec![PairUi::default()],
+            request_body_form_data: vec![PairUi::default()],
+            request_tab: RequestTab::Params,
+            response_tab: ResponseTab::Data,
+        }
     }
 }
 
@@ -1067,23 +1076,79 @@ impl PairUi {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
 enum RequestTab {
     Params,
     Headers,
     Body,
 }
-
-impl Display for RequestTab {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                RequestTab::Params => "Params",
-                RequestTab::Headers => "Headers",
-                RequestTab::Body => "Body",
-            }
-        )
+impl Default for RequestTab {
+    fn default() -> Self {
+        RequestTab::Params
     }
 }
+
+#[derive(strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
+enum RequestBodyTab {
+    Raw,
+    Form,
+    FormData,
+}
+
+impl Default for RequestBodyTab {
+    fn default() -> Self {
+        RequestBodyTab::Raw
+    }
+}
+
+#[derive(strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
+enum RequestBodyRawType {
+    /// 出入json文本
+    Json,
+    /// 字符串文本
+    Text,
+    /// foo=bar&foo=bar
+    Form,
+    /// xml 文本
+    XML,
+
+    /// 本地文件路径，或则http/https开始的文件
+    BinaryFile,
+}
+impl Default for RequestBodyRawType {
+    fn default() -> Self {
+        RequestBodyRawType::Json
+    }
+}
+
+#[derive(strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
+enum ResponseTab {
+    Data,
+    Header,
+}
+
+impl Default for ResponseTab {
+    fn default() -> Self {
+        ResponseTab::Data
+    }
+}
+
+#[derive(strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
+enum Method {
+    OPTIONS,
+    GET,
+    POST,
+    PUT,
+    DELETE,
+    HEAD,
+    TRACE,
+    CONNECT,
+    PATCH,
+}
+
+impl Default for Method {
+    fn default() -> Self {
+        Method::GET
+    }
+}
+/* #endregion */

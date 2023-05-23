@@ -33,6 +33,9 @@ tokio = { version = "1", features = ["full"] }
 # https://docs.rs/reqwest/latest/reqwest/
 reqwest = { version = "0.11", features = ["json", "multipart"] }
 
+# https://github.com/Peternator7/strum
+strum = { version = "0.24", features = ["derive"] }
+
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
