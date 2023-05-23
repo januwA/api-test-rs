@@ -36,6 +36,15 @@ reqwest = { version = "0.11", features = ["json", "multipart"] }
 # https://github.com/Peternator7/strum
 strum = { version = "0.24", features = ["derive"] }
 
+chrono = { version = "0.4", features = ["serde"] }
+
+[dependencies.uuid]
+version = "1.3.3"
+features = [
+    "v4",                # Lets you generate random UUIDs
+    "fast-rng",          # Use a faster (but still sufficiently random) RNG
+    "macro-diagnostics", # Enable better diagnostics for compile-time UUIDs
+]
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
