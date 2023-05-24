@@ -64,6 +64,8 @@ pub struct HttpConfig {
     pub tab_ui: RequestTab,
 
     pub send_count_ui: String,
+    #[serde(skip)]
+    pub send_count: usize,
 
     pub req_cfg: HttpRequestConfig,
 
@@ -74,10 +76,7 @@ pub struct HttpConfig {
     pub response_promise_vec: Vec<Promise<anyhow::Result<HttpResponse>>>,
 
     #[serde(skip)]
-    pub success_count: usize,
-
-    #[serde(skip)]
-    pub error_count: usize,
+    pub s_e_r: (usize, usize, usize),
 
     #[serde(skip)]
     pub download_path: String,
@@ -87,38 +86,41 @@ pub struct HttpConfig {
 }
 
 impl HttpConfig {
-    pub fn send_count(&self) -> usize {
-        self.send_count_ui.parse().unwrap_or(0)
-    }
-
     pub fn get_request_reper(&mut self) -> (usize, usize, usize) {
-        let mut success: usize = 0;
-        let mut error: usize = 0;
-        let mut ready: usize = 0;
+        if self.s_e_r.0 + self.s_e_r.1 >= self.send_count {
+            if !self.response_promise_vec.is_empty() {
+                // 显示最后一个结果
+                self.response_promise.get_or_insert_with(|| {
+                    let l = self.response_promise_vec.pop();
+                    self.response_promise_vec.clear(); // 清理掉其他结果
+                    l.unwrap()
+                });
+            }
+            return self.s_e_r;
+        }
 
+        self.s_e_r = (0, 0, 0);
         self.response_promise_vec
             .iter()
             .for_each(|p| match p.ready() {
                 Some(result) => match result {
                     Ok(res) => {
                         if res.status == reqwest::StatusCode::OK {
-                            success += 1;
+                            self.s_e_r.0 += 1;
                         } else {
-                            error += 1;
-                            println!("status error: {}", res.status);
+                            self.s_e_r.1 += 1;
                         }
                     }
-                    Err(err) => {
-                        error += 1;
-                        println!("error: {}", err);
+                    Err(_) => {
+                        self.s_e_r.1 += 1;
                     }
                 },
                 None => {
-                    ready += 1;
+                    self.s_e_r.2 += 1;
                 }
             });
 
-        (success, error, ready)
+        self.s_e_r
     }
 
     pub fn from_name(name: String) -> Self {
@@ -298,9 +300,9 @@ impl Clone for HttpConfig {
             req_cfg: self.req_cfg.clone(),
             download_path: Default::default(),
             response_promise_vec: Default::default(),
-            success_count: 0,
-            error_count: 0,
             send_count_ui: self.send_count_ui.to_owned(),
+            send_count: 0,
+            s_e_r: (0, 0, 0),
         }
     }
 }
@@ -315,9 +317,9 @@ impl Default for HttpConfig {
             response_tab_ui: ResponseTab::Data,
             req_cfg: HttpRequestConfig::default(),
             response_promise_vec: Default::default(),
-            success_count: 0,
-            error_count: 0,
             send_count_ui: String::from("1"),
+            s_e_r: (0, 0, 0),
+            send_count: 0,
         }
     }
 }

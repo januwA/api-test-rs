@@ -98,6 +98,7 @@ struct ApiTestApp {
     del_group_name: String,
     groups: Vec<Group>,
     action_status: String,
+    thread_count: String,
 
     // 已保存的项目
     saved: Vec<(String, String)>,
@@ -105,11 +106,14 @@ struct ApiTestApp {
 
 impl Default for ApiTestApp {
     fn default() -> Self {
+        let init_thread_count = 1;
+
         Self {
             project_name: Default::default(),
             project_path: Default::default(),
             rt: tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
+                .worker_threads(init_thread_count)
                 .build()
                 .unwrap(),
             groups: vec![],
@@ -119,6 +123,7 @@ impl Default for ApiTestApp {
             action_status: Default::default(),
             saved: Default::default(),
             del_group_name: Default::default(),
+            thread_count: init_thread_count.to_string(),
         }
     }
 }
@@ -137,14 +142,11 @@ impl ApiTestApp {
 
     /// 保存当前正在操作的项目
     fn save_current_project(&mut self) {
-        match util::save_current_project(SAVE_DIR, &self.project_name, &self.groups) {
-            Ok(_) => {
-                self.action_status = "save sucsess".to_owned();
-            }
-            Err(err) => {
-                self.action_status = err.to_string();
-            }
-        };
+        self.action_status =
+            match util::save_current_project(SAVE_DIR, &self.project_name, &self.groups) {
+                Ok(_) => "save sucsess".to_owned(),
+                Err(err) => err.to_string(),
+            };
     }
 
     /// 获取保存的project文件列表
@@ -311,6 +313,39 @@ impl eframe::App for ApiTestApp {
                         self.saved = saved;
                     }
                 }
+
+                ui.menu_button("Setting", |ui| {
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Thread Count");
+                            ui.text_edit_singleline(&mut self.thread_count);
+                            if ui.button("Set").clicked() {
+                                match self.thread_count.parse::<usize>() {
+                                    Ok(count) => {
+                                        match tokio::runtime::Builder::new_multi_thread()
+                                            .enable_all()
+                                            .worker_threads(count)
+                                            .build()
+                                        {
+                                            Ok(rt) => {
+                                                self.rt = rt;
+                                                self.action_status =
+                                                    "thread count set success".to_owned();
+                                                ui.close_menu();
+                                            }
+                                            Err(err) => {
+                                                self.action_status = err.to_string();
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        self.action_status = err.to_string();
+                                    }
+                                }
+                            }
+                        });
+                    });
+                });
             });
         });
         /* #endregion */
@@ -367,11 +402,8 @@ impl eframe::App for ApiTestApp {
                                             input_del.request_focus();
                                         }
 
-                                        if ui.button("Copy Group Name").clicked() {
-                                            ui.output_mut(|p| {
-                                                p.copied_text = group.name.to_owned();
-                                            });
-                                        }
+                                        // TODO:
+                                        ui.text_edit_singleline(&mut group.name);
                                     });
                                     ui.separator();
 
@@ -451,16 +483,27 @@ impl eframe::App for ApiTestApp {
                             }
                         });
 
-                    ui.add(egui::TextEdit::singleline(&mut hc.req_cfg.url).desired_width(400.));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut hc.req_cfg.url)
+                            .desired_width(400.)
+                            .hint_text("http url"),
+                    );
 
-                    ui.add(egui::TextEdit::singleline(&mut hc.send_count_ui).desired_width(60.));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut hc.send_count_ui)
+                            .desired_width(60.)
+                            .hint_text("Count"),
+                    );
 
                     if ui
                         .add_enabled(!hc.req_cfg.url.is_empty(), egui::Button::new("Send"))
                         .clicked()
                     {
+                        hc.response_promise = None;
                         hc.response_promise_vec.clear();
-                        for _ in 0..hc.send_count() {
+                        hc.s_e_r = (0, 0, 0);
+                        hc.send_count = hc.send_count_ui.parse().unwrap_or(0);
+                        for _ in 0..hc.send_count {
                             hc.response_promise_vec
                                 .push(HttpConfig::http_send_promise(&self.rt, hc.req_cfg.clone()));
                         }
@@ -545,6 +588,8 @@ impl eframe::App for ApiTestApp {
 
                 if let Some(response_promise) = &hc.response_promise {
                     match response_promise.ready() {
+                        // if !hc.response_promise_vec.is_empty() {
+                        //     match hc.response_promise_vec.first().unwrap().ready() {
                         Some(response) => match response {
                             Ok(response) => {
                                 ui.horizontal(|ui| {
