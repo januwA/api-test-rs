@@ -2,12 +2,19 @@
 
 use std::ffi::OsStr;
 
+use crate::{HttpConfig, HttpRequestConfig, HttpResponseUi, Promise};
 use anyhow::{anyhow, bail, Result};
 use eframe::egui;
 use image::GenericImageView;
+use reqwest::RequestBuilder;
 use serde_json::json;
+use tokio::runtime::Runtime;
 
-use crate::{AppConfig, Group, PairUi};
+use lazy_static::lazy_static;
+use regex::Regex;
+use std::collections::HashMap;
+
+use crate::{AppConfig, Group, PairUi, Project};
 
 pub fn load_app_icon() -> eframe::IconData {
     let app_icon_bytes = include_bytes!("../data/icon.png");
@@ -60,16 +67,6 @@ pub fn setup_custom_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-pub async fn get_utf8_data(data_vec: &Option<Vec<u8>>) -> Option<String> {
-    match data_vec {
-        Some(data_vec) => match std::str::from_utf8(data_vec.as_ref()) {
-            Ok(utf8_text) => Some(utf8_text.to_string()),
-            Err(_) => None,
-        },
-        _ => None,
-    }
-}
-
 pub fn get_filename<S: AsRef<OsStr> + ?Sized>(path: &S) -> Result<String> {
     Ok(std::path::Path::new(path)
         .file_stem()
@@ -84,7 +81,7 @@ pub fn get_filename<S: AsRef<OsStr> + ?Sized>(path: &S) -> Result<String> {
 /**
  * 从文件地址加载项目
  */
-pub fn load_project(project_path: &str) -> Result<(String, Vec<Group>)> {
+pub fn load_project(project_path: &str) -> Result<Project> {
     if project_path.is_empty() {
         bail!("加载路径不能为空")
     }
@@ -94,9 +91,9 @@ pub fn load_project(project_path: &str) -> Result<(String, Vec<Group>)> {
         bail!("文件不存在")
     }
     let data = std::fs::read(&load_path)?;
-    let dat: Vec<Group> = serde_json::from_slice(data.as_slice())?;
-    let project_name = get_filename(&load_path)?;
-    Ok((project_name, dat))
+    let dat: Project = serde_json::from_slice(data.as_slice())?;
+
+    Ok(dat)
 }
 
 /**
@@ -142,7 +139,6 @@ pub async fn read_binary(path: &str) -> Result<Vec<u8>> {
         if !p.exists() {
             bail!("file not exists")
         }
-
         tokio::fs::read(p).await?
     })
 }
@@ -180,15 +176,21 @@ pub fn part_vec(vec: Vec<PairUi>) -> Vec<(String, String)> {
     vec.into_iter().filter_map(|el| el.pair()).collect()
 }
 
-pub fn save_current_project(dir: &str, project_name: &str, groups: &Vec<Group>) -> Result<()> {
-    if project_name.is_empty() {
+pub fn real_part_vec(vec: Vec<PairUi>, vars: &Vec<PairUi>) -> Vec<(String, String)> {
+    part_vec(vec)
+        .iter()
+        .map(|x| real_pair_fn(x, vars))
+        .collect()
+}
+
+pub fn save_project(dir: &str, project: &Project) -> Result<()> {
+    if project.name.is_empty() {
         bail!("项目名称不能为空")
     };
 
-    // 先保存group
-    let group_data = serde_json::to_vec(groups)?;
-    let save_path = std::path::Path::new(dir).join(format!("{}.json", &project_name));
-    std::fs::write(&save_path, group_data)?;
+    let data = serde_json::to_vec(project)?;
+    let save_path = std::path::Path::new(dir).join(format!("{}.json", &project.name));
+    std::fs::write(&save_path, data)?;
 
     // 在保存 .config
     let config_content = serde_json::to_vec(&AppConfig {
@@ -201,4 +203,76 @@ pub fn save_current_project(dir: &str, project_name: &str, groups: &Vec<Group>) 
     )?;
 
     Ok(())
+}
+
+pub async fn http_send(req_cfg: HttpRequestConfig, vars: &Vec<PairUi>) -> Result<HttpResponseUi> {
+    let request_builder = req_cfg.request_build(vars).await?;
+
+    let response: reqwest::Response = request_builder.send().await?;
+
+    let status = response.status();
+    let version = response.version();
+    let headers = response.headers().to_owned();
+    let data_vec = response.bytes().await.and_then(|bs| Ok(bs.to_vec())).ok();
+
+    Ok(HttpResponseUi {
+        data_vec,
+        headers,
+        version,
+        status,
+        img: None,
+        data: None,
+    })
+}
+
+pub fn http_send_promise(
+    rt: &Runtime,
+    req_cfg: HttpRequestConfig,
+    vars: Vec<PairUi>,
+) -> Promise<Result<HttpResponseUi>> {
+    let (tx, p) = Promise::new();
+
+    rt.spawn(async move {
+        match http_send(req_cfg, &vars).await {
+            Ok(data) => {
+                if let Err(_) = tx.send(Ok(data)) {
+                    println!("send err");
+                }
+            }
+            Err(err) => {
+                if let Err(_) = tx.send(Err(err)) {
+                    println!("send err");
+                }
+            }
+        }
+    });
+
+    p
+}
+
+pub fn parse_var_str(oragin_str: &str, vars: &Vec<PairUi>) -> String {
+    lazy_static! {
+        // {var}}       to var
+        // {{ var }}    to var
+        // {{{var}}}    to {var}
+        static ref EXP1: Regex = Regex::new(r"\{\{([^\{\}]*)\}\}").unwrap();
+    }
+
+    let r2 = EXP1
+        .replace_all(oragin_str, |cap: &regex::Captures| {
+            let from = &cap[0];
+            let var_name = &cap[1].trim();
+
+            match vars.iter().find(|e| e.key.eq(var_name)) {
+                Some(res) => cap[0].replace(from, &res.value),
+                None => from.to_owned(),
+            }
+        })
+        .to_string();
+
+    r2
+}
+
+pub fn real_pair_fn((k, v): &(String, String), vars: &Vec<PairUi>) -> (String, String) {
+    (parse_var_str(k, vars), parse_var_str(v, vars))
 }

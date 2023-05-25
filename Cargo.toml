@@ -1,6 +1,6 @@
 [package]
 name = "api-test-rs"
-version = "0.1.1"
+version = "1.0.0"
 edition = "2021"
 
 build = "build.rs"
@@ -23,7 +23,6 @@ eframe = { version = "0.22.0", default-features = false, features = ["accesskit"
 egui_extras = { version = "0.22", features = ["image"] }
 image = { version = "0.24" }
 env_logger = "0.10"
-poll-promise = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
@@ -35,6 +34,8 @@ reqwest = { version = "0.11", features = ["json", "multipart"] }
 # https://github.com/Peternator7/strum
 strum = { version = "0.24", features = ["derive"] }
 
+regex = "1.5"
+lazy_static = "1.4"
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
-

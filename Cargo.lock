@@ -150,14 +150,15 @@ checksum = "9c7d0618f0e0b7e8ff11427422b64564d5fb0be1940354bfe2e0529b18a9d9b8"
 
 [[package]]
 name = "api-test-rs"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "eframe",
  "egui_extras",
  "env_logger",
  "image",
- "poll-promise",
+ "lazy_static",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -2109,15 +2110,6 @@ dependencies = [
  "fdeflate",
  "flate2",
  "miniz_oxide 0.7.1",
-]
-
-[[package]]
-name = "poll-promise"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcf2a02372dfae23c9c01267fb296b8a3413bb4e45fbd589c3ac73c6dcfbb305"
-dependencies = [
- "static_assertions",
 ]
 
 [[package]]

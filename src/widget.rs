@@ -1,23 +1,12 @@
-use std::{borrow::Borrow, ffi::OsStr, sync::Arc};
-
-use api_test_rs::{HttpConfig, PairUi};
+use crate::COLUMN_WIDTH_INITIAL;
+use api_test_rs::PairUi;
 use eframe::{
     egui::{self, Response, RichText, Ui},
     epaint::Color32,
 };
-use tokio::runtime::Runtime;
-
-use crate::{COLUMN_WIDTH_INITIAL, METHODS};
 
 pub fn error_button(ui: &mut Ui, text: impl Into<String>) -> Response {
     ui.add(egui::Button::new(RichText::new(text).color(Color32::WHITE)).fill(Color32::RED))
-}
-
-pub fn info_row(ui: &mut Ui, l: impl Into<String>, r: impl Into<String>) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(l).size(20.0));
-        ui.label(RichText::new(r).size(20.0));
-    });
 }
 
 pub fn error_label(ui: &mut Ui, text: impl Into<String>) -> Response {
@@ -41,9 +30,9 @@ pub fn pair_table(ui: &mut Ui, id: impl std::hash::Hash, pair_vec: &mut Vec<Pair
         .vertical(|mut strip| {
             strip.cell(|ui| {
                 egui::ScrollArea::vertical().id_source(id).show(ui, |ui| {
-                    let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
+                    // let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
 
-                    let mut table = egui_extras::TableBuilder::new(ui)
+                    let  table = egui_extras::TableBuilder::new(ui)
                         .striped(true)
                         .resizable(true)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
@@ -113,7 +102,7 @@ where
     T: Clone + PartialEq + AsRef<str> + ?Sized,
 {
     ui.horizontal(|ui| {
-        tabs.enumerate().for_each(|(i, label)| {
+        tabs.for_each(|label| {
             ui.selectable_value(current_value, label.to_owned(), label.as_ref());
         });
     });

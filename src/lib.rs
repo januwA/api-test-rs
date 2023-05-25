@@ -1,9 +1,7 @@
-use anyhow::bail;
-use egui_extras::RetainedImage;
-use poll_promise::Promise;
+use anyhow::{anyhow, bail, Result};
 use reqwest::{header::HeaderMap, RequestBuilder};
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Runtime;
+use tokio::sync::oneshot::{self, error::TryRecvError};
 mod util;
 
 const CONTENT_TYPE: &str = "Content-Type";
@@ -13,7 +11,7 @@ const APPLICATION_JSON: &str = "application/json";
 const APPLICATION_FORM: &str = "application/x-www-form-urlencoded";
 const APPLICATION_STREAM: &str = "application/octet-stream";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HttpRequestConfig {
     pub method: Method,
     pub url: String,
@@ -58,97 +56,28 @@ impl Default for HttpRequestConfig {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct HttpConfig {
-    pub name: String,
-    pub tab_ui: RequestTab,
-
-    pub send_count_ui: String,
-    #[serde(skip)]
-    pub send_count: usize,
-
-    pub req_cfg: HttpRequestConfig,
-
-    #[serde(skip)]
-    pub response_promise: Option<Promise<anyhow::Result<HttpResponse>>>,
-
-    #[serde(skip)]
-    pub response_promise_vec: Vec<Promise<anyhow::Result<HttpResponse>>>,
-
-    #[serde(skip)]
-    pub s_e_r: (usize, usize, usize),
-
-    #[serde(skip)]
-    pub download_path: String,
-
-    #[serde(skip)]
-    pub response_tab_ui: ResponseTab,
-}
-
-impl HttpConfig {
-    pub fn get_request_reper(&mut self) -> (usize, usize, usize) {
-        if self.s_e_r.0 + self.s_e_r.1 >= self.send_count {
-            if !self.response_promise_vec.is_empty() {
-                // 显示最后一个结果
-                self.response_promise.get_or_insert_with(|| {
-                    let l = self.response_promise_vec.pop();
-                    self.response_promise_vec.clear(); // 清理掉其他结果
-                    l.unwrap()
-                });
-            }
-            return self.s_e_r;
-        }
-
-        self.s_e_r = (0, 0, 0);
-        self.response_promise_vec
-            .iter()
-            .for_each(|p| match p.ready() {
-                Some(result) => match result {
-                    Ok(res) => {
-                        if res.status == reqwest::StatusCode::OK {
-                            self.s_e_r.0 += 1;
-                        } else {
-                            self.s_e_r.1 += 1;
-                        }
-                    }
-                    Err(_) => {
-                        self.s_e_r.1 += 1;
-                    }
-                },
-                None => {
-                    self.s_e_r.2 += 1;
-                }
-            });
-
-        self.s_e_r
-    }
-
-    pub fn from_name(name: String) -> Self {
-        Self {
-            name,
-            ..Self::default()
-        }
-    }
-
-    pub async fn request_builder_from_cfg(
-        req_cfg: HttpRequestConfig,
-    ) -> anyhow::Result<RequestBuilder> {
+impl HttpRequestConfig {
+    pub async fn request_build(self, vars: &Vec<PairUi>) -> Result<RequestBuilder> {
         let HttpRequestConfig {
             body_tab_ui,
             body_raw_type,
-            body_raw,
             url,
             ..
-        } = req_cfg;
+        } = self;
 
-        let method = req_cfg.method.as_reqwest_method();
-        let request_query = util::part_vec(req_cfg.query);
-        let request_header = util::part_vec(req_cfg.header);
-        let request_body_form = util::part_vec(req_cfg.body_form);
-        let request_body_form_data = util::part_vec(req_cfg.body_form_data);
+        let real_url = util::parse_var_str(&url, vars);
+        let method = self.method.as_reqwest_method();
+        let request_query = util::real_part_vec(self.query, vars);
+        let request_header = util::real_part_vec(self.header, vars);
+        let request_body_form = util::real_part_vec(self.body_form, vars);
+        let request_body_form_data = util::real_part_vec(self.body_form_data, vars);
+
+        let body_raw = self.body_raw;
+        // let body_raw = util::parse_var_str(&self.body_raw, vars);
 
         let client = reqwest::Client::new();
-        let mut request_builder = client.request(method, &url);
+
+        let mut request_builder = client.request(method, &real_url);
 
         // add query
         request_builder = request_builder.query(&request_query);
@@ -227,77 +156,83 @@ impl HttpConfig {
 
         Ok(request_builder)
     }
+}
 
-    pub async fn http_send(request_builder: RequestBuilder) -> anyhow::Result<HttpResponse> {
-        let response = request_builder.send().await?;
+#[derive(Serialize, Deserialize)]
+pub struct HttpConfig {
+    pub name: String,
+    pub tab_ui: RequestTab,
 
-        let status = response.status();
-        let version = response.version();
-        let headers = response.headers().to_owned();
+    pub send_count_ui: String,
 
-        let mut data: Option<String> = None;
-        let mut img: Option<Result<RetainedImage, String>> = None;
-        let data_vec = response.bytes().await.and_then(|bs| Ok(bs.to_vec())).ok();
+    pub req_cfg: HttpRequestConfig,
 
-        if let Some(ct) = headers.get(CONTENT_TYPE) {
-            if let Ok(ct) = ct.to_str() {
-                if ct.starts_with("image/") {
-                    if let Some(img_vec) = &data_vec {
-                        img = Some(RetainedImage::from_image_bytes("", img_vec.as_ref()));
-                    }
-                } else {
-                    data = util::get_utf8_data(&data_vec).await;
-                }
-            } else {
-                data = util::get_utf8_data(&data_vec).await;
+    #[serde(skip)]
+    pub send_count: usize,
+
+    #[serde(skip)]
+    pub response_promise: Option<Promise<Result<HttpResponseUi>>>,
+
+    #[serde(skip)]
+    pub response_promise_vec: Vec<Promise<Result<HttpResponseUi>>>,
+
+    #[serde(skip)]
+    pub s_e_r: (usize, usize, usize),
+
+    #[serde(skip)]
+    pub download_path: String,
+
+    #[serde(skip)]
+    pub response_tab_ui: ResponseTab,
+}
+
+impl HttpConfig {
+    pub fn get_request_reper(&mut self) -> (usize, usize, usize) {
+        if self.s_e_r.0 + self.s_e_r.1 >= self.send_count {
+            if !self.response_promise_vec.is_empty() {
+                self.response_promise.get_or_insert_with(|| {
+                    let l = self.response_promise_vec.remove(0); // 显示第一个数据
+                    self.response_promise_vec.clear(); // 清理掉结果
+                    l
+                });
             }
-        } else {
-            data = util::get_utf8_data(&data_vec).await;
+            return self.s_e_r;
         }
 
-        Ok(HttpResponse {
-            data_vec,
-            headers,
-            version,
-            status,
-            data,
-            img,
-        })
+        self.s_e_r = (0, 0, 0);
+        self.response_promise_vec
+            .iter_mut()
+            .for_each(|p| match p.read() {
+                PromiseStatus::PADING => {
+                    self.s_e_r.2 += 1;
+                }
+                PromiseStatus::Fulfilled(_) => {
+                    self.s_e_r.0 += 1;
+                }
+                PromiseStatus::Rejected(_) => {
+                    self.s_e_r.1 += 1;
+                }
+            });
+
+        self.s_e_r
     }
 
-    pub fn http_send_promise(
-        rt: &Runtime,
-        req_cfg: HttpRequestConfig,
-    ) -> Promise<anyhow::Result<HttpResponse>> {
-        let (sender, response_promise) = Promise::new();
-
-        rt.spawn(async move {
-            match HttpConfig::request_builder_from_cfg(req_cfg).await {
-                Ok(request_builder) => match HttpConfig::http_send(request_builder).await {
-                    Ok(data) => sender.send(Ok(data)),
-                    Err(err) => sender.send(Err(err)),
-                },
-                Err(err) => {
-                    sender.send(Err(err));
-                }
-            }
-        });
-
-        return response_promise;
+    pub fn from_name(name: String) -> Self {
+        Self {
+            name,
+            ..Self::default()
+        }
     }
 }
 
 impl Clone for HttpConfig {
     fn clone(&self) -> Self {
-        let mut name = self.name.clone();
-        name.push_str(" Copy");
-
         Self {
-            name,
-            tab_ui: self.tab_ui.clone(),
+            name: self.name.to_owned(),
+            tab_ui: self.tab_ui.to_owned(),
             response_promise: None,
-            response_tab_ui: self.response_tab_ui.clone(),
-            req_cfg: self.req_cfg.clone(),
+            response_tab_ui: self.response_tab_ui.to_owned(),
+            req_cfg: self.req_cfg.to_owned(),
             download_path: Default::default(),
             response_promise_vec: Default::default(),
             send_count_ui: self.send_count_ui.to_owned(),
@@ -324,13 +259,25 @@ impl Default for HttpConfig {
     }
 }
 
-pub struct HttpResponse {
+pub struct HttpResponseUi {
     pub headers: HeaderMap,
     pub version: reqwest::Version,
     pub status: reqwest::StatusCode,
     pub data: Option<String>,
     pub img: Option<Result<egui_extras::RetainedImage, String>>,
     pub data_vec: Option<Vec<u8>>,
+}
+
+impl HttpResponseUi {
+    pub fn content_type(&self) -> Option<&str> {
+        self.headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok())
+    }
+
+    pub fn content_type_image(&self) -> bool {
+        self.content_type()
+            .and_then(|v| Some(v.starts_with("image/")))
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -352,9 +299,17 @@ impl PairUi {
             Some((self.key, self.value))
         }
     }
+
+    pub fn from_kv(k: &str, v: &str) -> Self {
+        Self {
+            key: k.to_owned(),
+            value: v.to_owned(),
+            disable: false,
+        }
+    }
 }
 
-#[derive(strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RequestTab {
     Params,
     Headers,
@@ -366,7 +321,7 @@ impl Default for RequestTab {
     }
 }
 
-#[derive(strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RequestBodyTab {
     Raw,
     Form,
@@ -379,7 +334,7 @@ impl Default for RequestBodyTab {
     }
 }
 
-#[derive(strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RequestBodyRawType {
     /// 出入json文本
     Json,
@@ -399,7 +354,7 @@ impl Default for RequestBodyRawType {
     }
 }
 
-#[derive(strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ResponseTab {
     Data,
     Header,
@@ -411,7 +366,7 @@ impl Default for ResponseTab {
     }
 }
 
-#[derive(strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, strum::AsRefStr, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Method {
     OPTIONS,
     GET,
@@ -480,13 +435,13 @@ impl Group {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub project_path: String,
 }
 
 impl AppConfig {
-    pub fn load(dir: &str) -> anyhow::Result<Self> {
+    pub fn load(dir: &str) -> Result<Self> {
         let path = std::path::Path::new(dir).join(".config.json");
 
         if path.exists() {
@@ -495,6 +450,95 @@ impl AppConfig {
             Ok(dat)
         } else {
             bail!("config not exists")
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub name: String,
+    pub groups: Vec<Group>,
+    pub variables: Vec<PairUi>,
+}
+
+impl Project {
+    pub fn from_name(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            groups: Default::default(),
+            variables: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum PromiseStatus<T> {
+    PADING,
+    Fulfilled(T),
+    Rejected(anyhow::Error),
+}
+
+#[derive(Debug)]
+pub struct Promise<T> {
+    pub data: Option<T>,
+    rx: oneshot::Receiver<T>,
+}
+
+impl<T> Promise<T> {
+    pub fn new() -> (oneshot::Sender<T>, Self) {
+        let (tx, rx) = oneshot::channel::<T>();
+        (tx, Self { data: None, rx })
+    }
+
+    pub fn read(&mut self) -> PromiseStatus<&T> {
+        match self.rx.try_recv() {
+            Ok(data) => {
+                self.data = Some(data);
+
+                return if let Some(data) = &self.data {
+                    PromiseStatus::Fulfilled(data)
+                } else {
+                    PromiseStatus::PADING
+                };
+            }
+            Err(err) => match err {
+                // 尚未发送值
+                TryRecvError::Empty => return PromiseStatus::PADING,
+
+                // 被丢弃，或则已经发送
+                TryRecvError::Closed => {
+                    if let Some(data) = &self.data {
+                        return PromiseStatus::Fulfilled(data);
+                    }
+                    return PromiseStatus::Rejected(anyhow!(err));
+                }
+            },
+        }
+    }
+
+    pub fn read_mut(&mut self) -> PromiseStatus<&mut T> {
+        match self.rx.try_recv() {
+            Ok(data) => {
+                self.data = Some(data);
+
+                return if let Some(data) = &mut self.data {
+                    PromiseStatus::Fulfilled(data)
+                } else {
+                    PromiseStatus::PADING
+                };
+            }
+            Err(err) => match err {
+                // 尚未发送值
+                TryRecvError::Empty => return PromiseStatus::PADING,
+
+                // 被丢弃，或则已经发送
+                TryRecvError::Closed => {
+                    if let Some(data) = &mut self.data {
+                        return PromiseStatus::Fulfilled(data);
+                    }
+                    return PromiseStatus::Rejected(anyhow!(err));
+                }
+            },
         }
     }
 }

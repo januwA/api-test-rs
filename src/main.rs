@@ -1,33 +1,19 @@
-#![allow(warnings, unused)]
+// #![allow(warnings, unused)]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use std::borrow::BorrowMut;
-use std::fmt::Display;
-use std::net::SocketAddr;
-use std::ops::{Index, IndexMut};
+use std::ops::Index;
 
-use anyhow::anyhow;
-use api_test_rs::{
-    AppConfig, Group, HttpConfig, Method, PairUi, RequestBodyRawType, RequestBodyTab, RequestTab,
-    ResponseTab,
-};
-use eframe::egui::output::OpenUrl;
-use eframe::egui::{CollapsingHeader, TextBuffer};
-use eframe::epaint::vec2;
-use eframe::{
-    egui::{self, Hyperlink, RichText, Ui},
-    epaint::Color32,
-};
+use api_test_rs::*;
+use eframe::egui::CollapsingHeader;
+use eframe::egui::{self};
+use eframe::epaint::{Color32, vec2};
 use egui_extras::RetainedImage;
-use poll_promise::Promise;
-use reqwest::header::HeaderMap;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
 use tokio::runtime::Runtime;
 
 mod util;
 mod widget;
 
 /* #region const variables */
+const SEND_THREAD_COUN:usize = 2;
 const SAVE_DIR: &str = "./_SAVED/";
 const METHODS: [Method; 9] = [
     Method::GET,
@@ -62,7 +48,7 @@ fn main() -> Result<(), eframe::Error> {
 
     let save_dir = std::path::Path::new(SAVE_DIR);
     if !save_dir.exists() {
-        std::fs::create_dir_all(save_dir);
+        std::fs::create_dir_all(save_dir).unwrap();
     }
 
     let mut options = eframe::NativeOptions::default();
@@ -86,9 +72,6 @@ fn main() -> Result<(), eframe::Error> {
 struct ApiTestApp {
     rt: Runtime,
 
-    // 项目名称
-    project_name: String,
-
     // 加载保存的项目文件路径
     project_path: String,
     select_api_test_index: Option<(usize, usize)>,
@@ -96,34 +79,45 @@ struct ApiTestApp {
     new_project_name: String,
     new_group_name: String,
     del_group_name: String,
-    groups: Vec<Group>,
+
+    // 当前项目
+    project: Project,
+
     action_status: String,
     thread_count: String,
 
-    // 已保存的项目
+    // 已保存的项目 (name, path)
     saved: Vec<(String, String)>,
 }
 
 impl Default for ApiTestApp {
     fn default() -> Self {
-        let init_thread_count = 1;
-
         Self {
-            project_name: Default::default(),
-            project_path: Default::default(),
             rt: tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(init_thread_count)
+                .worker_threads(SEND_THREAD_COUN)
                 .build()
                 .unwrap(),
-            groups: vec![],
             new_group_name: Default::default(),
             new_project_name: Default::default(),
-            select_api_test_index: None,
             action_status: Default::default(),
             saved: Default::default(),
             del_group_name: Default::default(),
-            thread_count: init_thread_count.to_string(),
+            thread_count: SEND_THREAD_COUN.to_string(),
+            project_path: Default::default(),
+            select_api_test_index: Some((0, 0)),
+            project: Project {
+                name: "Any".to_owned(),
+                groups: vec![{
+                        let mut g =   Group::from_name("Group #1".to_owned());
+                        let mut t = HttpConfig::from_name("test".to_owned());
+                        t.req_cfg.url = "{{base}}/ping".to_owned();
+                        g.childrent.push(t);
+                        g
+                    }
+                ],
+                variables: vec![PairUi::from_kv("base", "http://127.0.0.1:3000")],
+            },
         }
     }
 }
@@ -136,17 +130,18 @@ impl ApiTestApp {
         if let Some(config) = config {
             my.project_path = config.project_path;
             my.load_project();
+            my.select_api_test_index = None;
         }
         my
     }
 
     /// 保存当前正在操作的项目
     fn save_current_project(&mut self) {
-        self.action_status =
-            match util::save_current_project(SAVE_DIR, &self.project_name, &self.groups) {
+            self.action_status = match util::save_project( SAVE_DIR, &self.project) {
                 Ok(_) => "save sucsess".to_owned(),
                 Err(err) => err.to_string(),
             };
+     
     }
 
     /// 获取保存的project文件列表
@@ -160,8 +155,14 @@ impl ApiTestApp {
                 Ok(file_name) => Some((file_name, e)),
                 Err(_) => None,
             })
-            .filter_map(|e| if e.0.starts_with(".") { None } else { Some(e) })
-            .map(|(file_name, e)| {
+            .filter_map(|e| {
+                if e.0.starts_with(".") {
+                    None
+                } else {
+                    Some(e.1)
+                }
+            })
+            .map(|e| {
                 let file_stem = e.path().file_stem().unwrap().to_str().unwrap().to_string();
                 let path = e.path().to_str().unwrap().to_string();
 
@@ -172,12 +173,10 @@ impl ApiTestApp {
 
     /// 创建一个新项目，保存当前正在操作的项目
     fn create_project(&mut self) {
-        if !self.project_name.is_empty() {
-            self.save_current_project();
-        }
+        self.save_current_project();
 
-        self.project_name = self.new_project_name.to_owned();
-        self.groups.clear();
+        self.project = Project::from_name(&self.new_project_name);
+
         self.select_api_test_index = None;
         self.new_project_name.clear(); // clear input name
         self.project_path.clear(); // new project not save
@@ -186,9 +185,8 @@ impl ApiTestApp {
     /// 加载一个项目
     fn load_project(&mut self) {
         match util::load_project(&self.project_path) {
-            Ok((project_name, data)) => {
-                self.groups = data;
-                self.project_name = project_name;
+            Ok(project) => {
+                self.project = project;
                 self.select_api_test_index = None;
                 self.action_status = "Load project success".to_owned();
             }
@@ -233,6 +231,7 @@ impl eframe::App for ApiTestApp {
                     ui.separator();
 
                     ui.horizontal(|ui| {
+                        ui.style_mut().visuals.override_text_color = Some(Color32::GREEN);
                         let input_add = ui.add(
                             egui::TextEdit::singleline(&mut self.new_group_name)
                                 .hint_text("Enter Add Group"),
@@ -243,10 +242,10 @@ impl eframe::App for ApiTestApp {
                             && !self.new_group_name.is_empty()
                         {
                             let name = self.new_group_name.to_owned();
-                            let name_exists = self.groups.iter().any(|el| el.name == name);
+                            let name_exists = self.project.groups.iter().any(|el| el.name == name);
 
                             if !name_exists {
-                                self.groups
+                                self.project.groups
                                     .push(Group::from_name(self.new_group_name.to_owned()));
                                 self.new_group_name.clear();
                                 self.action_status = "create success".to_owned();
@@ -260,6 +259,7 @@ impl eframe::App for ApiTestApp {
                     ui.separator();
 
                     ui.horizontal(|ui| {
+                        ui.style_mut().visuals.override_text_color = Some(Color32::RED);
                         let input_del = ui.add(
                             egui::TextEdit::singleline(&mut self.del_group_name)
                                 .hint_text("Enter Del Group"),
@@ -270,11 +270,11 @@ impl eframe::App for ApiTestApp {
                             && !self.del_group_name.is_empty()
                         {
                             let name = self.del_group_name.to_owned();
-                            let name_exists = self.groups.iter().position(|el| el.name == name);
+                            let name_exists = self.project.groups.iter().position(|el| el.name == name);
 
                             if let Some(index) = name_exists {
                                 self.select_api_test_index = None;
-                                self.groups.remove(index);
+                                self.project.groups.remove(index);
                                 self.del_group_name.clear();
 
                                 self.action_status = "delete success".to_owned();
@@ -287,10 +287,11 @@ impl eframe::App for ApiTestApp {
 
                     ui.separator();
 
-                    if ui.button("Save Current Project").clicked() {
-                        self.save_current_project();
-                        ui.close_menu();
-                    }
+                   
+                        if ui.add(egui::Button::new("Save Current Project").min_size(vec2( ui.max_rect().width(), 30.0))).clicked() {
+                            self.save_current_project();
+                            ui.close_menu();
+                        }
                 });
 
                 let saved_menu = ui.menu_button("Saved", |ui| {
@@ -354,14 +355,91 @@ impl eframe::App for ApiTestApp {
         egui::SidePanel::left("left_panel")
             .resizable(true)
             .default_width(220.0)
-            .width_range(80.0..=600.0)
+            .width_range(30.0..=600.0)
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.heading(&self.project_name);
+                    ui.heading(&self.project.name);
                 });
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.groups
+                    CollapsingHeader::new("Variables")
+                    .default_open(false)
+                    .show(ui, |ui| {
+
+                        ui.vertical(|ui| {
+                            if ui.button("Add").clicked() {
+                                self.project.variables.push(PairUi::default());
+                            }
+                        });
+                    
+                        ui.separator();
+                    
+                        egui_extras::StripBuilder::new(ui)
+                            .size(egui_extras::Size::remainder().at_most(120.0))
+                            .vertical(|mut strip| {
+                                strip.cell(|ui| {
+                                        let  table = egui_extras::TableBuilder::new(ui)
+                                            .striped(true)
+                                            .resizable(true)
+                                            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                                            .column(egui_extras::Column::auto())
+                                            .column(egui_extras::Column::auto().range(100.0..=400.0))
+                                            .column(egui_extras::Column::auto().range(100.0..=400.0))
+                                            .column(egui_extras::Column::auto())
+                                            .min_scrolled_height(10.0)
+                                            // .scroll_to_row(1, Some(egui::Align::BOTTOM))
+                                            ;
+                    
+                                        table
+                                            .header(20.0, |mut header| {
+                                                header.col(|ui| {
+                                                    ui.strong("");
+                                                });
+                                                header.col(|ui| {
+                                                    ui.strong("Key");
+                                                });
+                                                header.col(|ui| {
+                                                    ui.strong("Value");
+                                                });
+                                            })
+                                            .body(|mut body| {
+                                                self.project.variables.retain_mut(|el| {
+                                                    let mut r = true;
+                    
+                                                    body.row(30.0, |mut row| {
+                                                        row.col(|ui| {
+                                                            ui.checkbox(&mut el.disable, "");
+                                                        });
+                    
+                                                        row.col(|ui| {
+                                                            ui.add(
+                                                                egui::TextEdit::singleline(&mut el.key)
+                                                                    .desired_width(f32::INFINITY),
+                                                            );
+                                                        });
+                    
+                                                        row.col(|ui| {
+                                                            ui.add(
+                                                                egui::TextEdit::singleline(&mut el.value)
+                                                                    .desired_width(f32::INFINITY),
+                                                            );
+                                                        });
+                    
+                                                        row.col(|ui| {
+                                                            if ui.button("Del").clicked() {
+                                                                r = false;
+                                                            }
+                                                        });
+                                                    });
+                                                    r
+                                                });
+                                            })
+                                });
+                            });
+                    });
+                    ui.separator();
+
+                    self.project.groups
                         .iter_mut()
                         .enumerate()
                         .for_each(|(group_index, group)| {
@@ -439,15 +517,9 @@ impl eframe::App for ApiTestApp {
 
         // egui::SidePanel::right("right_panel")
         //     .resizable(true)
-        //     .default_width(150.0)
-        //     .width_range(80.0..=200.0)
+        //     .default_width(120.0)
+        //     .width_range(0.0..=400.0)
         //     .show(ctx, |ui| {
-        //         ui.vertical_centered(|ui| {
-        //             ui.heading("Right Panel");
-        //         });
-        //         egui::ScrollArea::vertical().show(ui, |ui| {
-        //             ui.label("text");
-        //         });
         //     });
 
         /* #region center panel */
@@ -464,7 +536,7 @@ impl eframe::App for ApiTestApp {
             /* #endregion */
 
             if let Some(ii) = self.select_api_test_index {
-                let group = &mut self.groups[ii.0];
+                let group = &mut self.project.groups[ii.0];
                 let hc = &mut group.childrent[ii.1];
 
                 ui.horizontal(|ui| {
@@ -499,20 +571,28 @@ impl eframe::App for ApiTestApp {
                         .add_enabled(!hc.req_cfg.url.is_empty(), egui::Button::new("Send"))
                         .clicked()
                     {
+                        // get send count
+                        hc.send_count = hc.send_count_ui.parse().unwrap_or(0);
+                        let capacity = hc.send_count;
+
+                        // clear old data
                         hc.response_promise = None;
                         hc.response_promise_vec.clear();
                         hc.s_e_r = (0, 0, 0);
-                        hc.send_count = hc.send_count_ui.parse().unwrap_or(0);
-                        for _ in 0..hc.send_count {
-                            hc.response_promise_vec
-                                .push(HttpConfig::http_send_promise(&self.rt, hc.req_cfg.clone()));
+
+                        // init result vec size
+                        hc.response_promise_vec = Vec::with_capacity(capacity);
+
+                        for _ in 0..capacity {
+                            hc.response_promise_vec.push(util::http_send_promise(&self.rt, hc.req_cfg.to_owned(), self.project.variables.to_owned() ));
                         }
                     }
 
                     ui.separator();
 
+                    // request result count
                     let (s, e, r) = hc.get_request_reper();
-                    ui.label(format!("s:{}, e:{}, r:{}", s, e, r,));
+                    ui.label(format!("s:{s}, e:{e}, r:{r}"));
 
                     ui.separator();
                 });
@@ -541,15 +621,13 @@ impl eframe::App for ApiTestApp {
                                 ui.vertical(|ui| {
                                     ui.group(|ui| {
                                         ui.horizontal(|ui| {
-                                            for (i, raw_type) in
-                                                REQ_BODY_RAW_TYPES.iter().enumerate()
-                                            {
+                                            REQ_BODY_RAW_TYPES.iter().for_each(|raw_type| {
                                                 ui.radio_value(
                                                     &mut hc.req_cfg.body_raw_type,
                                                     raw_type.to_owned(),
                                                     raw_type.as_ref(),
                                                 );
-                                            }
+                                            });
                                         });
                                     });
 
@@ -586,12 +664,29 @@ impl eframe::App for ApiTestApp {
 
                 ui.separator();
 
-                if let Some(response_promise) = &hc.response_promise {
-                    match response_promise.ready() {
-                        // if !hc.response_promise_vec.is_empty() {
-                        //     match hc.response_promise_vec.first().unwrap().ready() {
-                        Some(response) => match response {
+                if let Some(promise) = &mut hc.response_promise {
+                    match promise.read_mut() {
+                        PromiseStatus::PADING => {
+                            ui.spinner();
+                        }
+                        PromiseStatus::Rejected(err) => {
+                            widget::error_label(ui, &err.to_string());
+                        }
+                        PromiseStatus::Fulfilled(response) => match response {
                             Ok(response) => {
+                                // 初始化图片或则字符串数据
+                                if let Some(data_vec) = &response.data_vec {
+                                    if response.content_type_image() {
+                                        response.img.get_or_insert_with(|| RetainedImage::from_image_bytes("", data_vec.as_ref()) );
+                                    } else {
+                                        response.data.get_or_insert_with(||
+                                            std::str::from_utf8(data_vec.as_ref())
+                                                .unwrap_or("")
+                                                .to_owned()
+                                        );
+                                    }
+                                }
+
                                 ui.horizontal(|ui| {
                                     ui.heading(format!(
                                         "Response Status: {:?} {}",
@@ -633,31 +728,36 @@ impl eframe::App for ApiTestApp {
                                 ui.separator();
 
                                 match hc.response_tab_ui {
-                                    ResponseTab::Data => {
-                                        egui::ScrollArea::vertical()
-                                            .hscroll(true)
-                                            .id_source("response data scroll")
-                                            .auto_shrink([false, false])
-                                            .show(ui, |ui| {
-                                                if let Some(img_data) = &response.img {
-                                                    match img_data {
-                                                        Ok(image) => {
-                                                            image.show(ui);
+                                    ResponseTab::Data => match &response.data_vec {
+                                        Some(_) => {
+                                            egui::ScrollArea::vertical()
+                                                .hscroll(true)
+                                                .id_source("response data scroll")
+                                                .auto_shrink([false, false])
+                                                .show(ui, |ui| {
+                                                    if let Some(img_data) = &response.img {
+                                                        match img_data {
+                                                            Ok(image) => {
+                                                                image.show(ui);
+                                                            }
+                                                            Err(err) => {
+                                                                widget::error_label(
+                                                                    ui,
+                                                                    &err.to_string(),
+                                                                );
+                                                            }
                                                         }
-                                                        Err(err) => {
-                                                            widget::error_label(
-                                                                ui,
-                                                                &err.to_string(),
-                                                            );
-                                                        }
+                                                    } else if let Some(text_data) = &response.data {
+                                                        widget::code_view_ui(ui, text_data);
+                                                    } else {
+                                                        widget::error_label(ui, "其他类型");
                                                     }
-                                                } else if let Some(text_data) = &response.data {
-                                                    widget::code_view_ui(ui, text_data);
-                                                } else {
-                                                    widget::error_label(ui, "其他类型");
-                                                }
-                                            });
-                                    }
+                                                });
+                                        }
+                                        _ => {
+                                            widget::error_label(ui, "NOT DATA");
+                                        }
+                                    },
                                     ResponseTab::Header => {
                                         egui::ScrollArea::vertical()
                                             .hscroll(true)
@@ -684,9 +784,6 @@ impl eframe::App for ApiTestApp {
                                 widget::error_label(ui, &err.to_string());
                             }
                         },
-                        _ => {
-                            ui.spinner();
-                        }
                     }
                 };
             }
