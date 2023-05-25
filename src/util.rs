@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use crate::{AppConfig, Group, PairUi, Project};
 
 pub fn load_app_icon() -> eframe::IconData {
-    let app_icon_bytes = include_bytes!("../data/icon.png");
+    let app_icon_bytes = include_bytes!("../data/icon.jpg");
     let app_icon = image::load_from_memory(app_icon_bytes).expect("load icon error");
     let (app_icon_width, app_icon_height) = app_icon.dimensions();
 
