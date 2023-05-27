@@ -5,7 +5,7 @@ use std::ops::Index;
 use api_test_rs::*;
 use eframe::egui::CollapsingHeader;
 use eframe::egui::{self};
-use eframe::epaint::{Color32, vec2};
+use eframe::epaint::{Color32, vec2, pos2};
 use egui_extras::RetainedImage;
 use tokio::runtime::Runtime;
 
@@ -74,7 +74,7 @@ struct ApiTestApp {
 
     // 加载保存的项目文件路径
     project_path: String,
-    select_api_test_index: Option<(usize, usize)>,
+    select_group: Option<(usize, usize)>,
 
     new_project_name: String,
     new_group_name: String,
@@ -88,6 +88,9 @@ struct ApiTestApp {
 
     // 已保存的项目 (name, path)
     saved: Vec<(String, String)>,
+
+    open_model: bool,
+    model: WindowOptions,
 }
 
 impl Default for ApiTestApp {
@@ -105,7 +108,7 @@ impl Default for ApiTestApp {
             del_group_name: Default::default(),
             thread_count: SEND_THREAD_COUN.to_string(),
             project_path: Default::default(),
-            select_api_test_index: Some((0, 0)),
+            select_group: Some((0, 0)),
             project: Project {
                 name: "Any".to_owned(),
                 groups: vec![{
@@ -118,6 +121,8 @@ impl Default for ApiTestApp {
                 ],
                 variables: vec![PairUi::from_kv("base", "http://127.0.0.1:3000")],
             },
+            open_model: false,
+            model: WindowOptions::default(),
         }
     }
 }
@@ -130,7 +135,7 @@ impl ApiTestApp {
         if let Some(config) = config {
             my.project_path = config.project_path;
             my.load_project();
-            my.select_api_test_index = None;
+            my.select_group = None;
         }
         my
     }
@@ -177,7 +182,7 @@ impl ApiTestApp {
 
         self.project = Project::from_name(&self.new_project_name);
 
-        self.select_api_test_index = None;
+        self.select_group = None;
         self.new_project_name.clear(); // clear input name
         self.project_path.clear(); // new project not save
     }
@@ -187,7 +192,7 @@ impl ApiTestApp {
         match util::load_project(&self.project_path) {
             Ok(project) => {
                 self.project = project;
-                self.select_api_test_index = None;
+                self.select_group = None;
                 self.action_status = "Load project success".to_owned();
             }
             Err(err) => {
@@ -204,6 +209,9 @@ impl eframe::App for ApiTestApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+
+        self.model.show(ctx, &mut self.open_model, &mut self.select_group, &mut self.project);
+
         /* #region top menus */
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -230,63 +238,13 @@ impl eframe::App for ApiTestApp {
 
                     ui.separator();
 
-                    ui.horizontal(|ui| {
-                        ui.style_mut().visuals.override_text_color = Some(Color32::GREEN);
-                        let input_add = ui.add(
-                            egui::TextEdit::singleline(&mut self.new_group_name)
-                                .hint_text("Enter Add Group"),
-                        );
-
-                        if input_add.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                            && !self.new_group_name.is_empty()
-                        {
-                            let name = self.new_group_name.to_owned();
-                            let name_exists = self.project.groups.iter().any(|el| el.name == name);
-
-                            if !name_exists {
-                                self.project.groups
-                                    .push(Group::from_name(self.new_group_name.to_owned()));
-                                self.new_group_name.clear();
-                                self.action_status = "create success".to_owned();
-                                input_add.request_focus();
-                            } else {
-                                self.action_status = "name exists".to_owned();
-                            }
-                        }
-                    });
+                    if ui.add(egui::Button::new("Add Group")).clicked() {
+                        self.model.wt = WindowType::AddGroup;
+                        self.open_model = true;
+                        ui.close_menu();
+                    }
 
                     ui.separator();
-
-                    ui.horizontal(|ui| {
-                        ui.style_mut().visuals.override_text_color = Some(Color32::RED);
-                        let input_del = ui.add(
-                            egui::TextEdit::singleline(&mut self.del_group_name)
-                                .hint_text("Enter Del Group"),
-                        );
-
-                        if input_del.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                            && !self.del_group_name.is_empty()
-                        {
-                            let name = self.del_group_name.to_owned();
-                            let name_exists = self.project.groups.iter().position(|el| el.name == name);
-
-                            if let Some(index) = name_exists {
-                                self.select_api_test_index = None;
-                                self.project.groups.remove(index);
-                                self.del_group_name.clear();
-
-                                self.action_status = "delete success".to_owned();
-                                input_del.request_focus();
-                            } else {
-                                self.action_status = "name not exists".to_owned();
-                            }
-                        }
-                    });
-
-                    ui.separator();
-
                    
                         if ui.add(egui::Button::new("Save Current Project").min_size(vec2( ui.max_rect().width(), 30.0))).clicked() {
                             self.save_current_project();
@@ -448,6 +406,13 @@ impl eframe::App for ApiTestApp {
                                 .default_open(false)
                                 .show(ui, |ui| {
                                     ui.menu_button("...", |ui| {
+
+                                        if ui.button("Del Group").clicked() {
+                                            self.model.wt = WindowType::DelGroup;
+                                            self.model.del_group_idx =group_index;
+                                            self.open_model = true;
+                                        }
+
                                         let input_add = ui.add(
                                             egui::TextEdit::singleline(&mut group.new_child_name)
                                                 .desired_width(120.0)
@@ -475,7 +440,7 @@ impl eframe::App for ApiTestApp {
                                             && ui.input(|i| i.key_pressed(egui::Key::Enter))
                                             && !group.del_child_name.is_empty()
                                         {
-                                            self.select_api_test_index = None;
+                                            self.select_group = None;
                                             group.del_child();
                                             input_del.request_focus();
                                         }
@@ -490,7 +455,7 @@ impl eframe::App for ApiTestApp {
                                         |ui| {
                                             group.childrent.iter().enumerate().rev().for_each(
                                                 |(cfg_i, cfg)| {
-                                                    let checked = match self.select_api_test_index {
+                                                    let checked = match self.select_group {
                                                         Some((i, j)) => {
                                                             i == group_index && j == cfg_i
                                                         }
@@ -501,7 +466,7 @@ impl eframe::App for ApiTestApp {
                                                         .selectable_label(checked, &cfg.name)
                                                         .clicked()
                                                     {
-                                                        self.select_api_test_index =
+                                                        self.select_group =
                                                             Some((group_index, cfg_i));
                                                     }
                                                     ui.separator();
@@ -524,6 +489,9 @@ impl eframe::App for ApiTestApp {
 
         /* #region center panel */
         egui::CentralPanel::default().show(ctx, |ui| {
+
+
+
             /* #region action bar */
             egui::TopBottomPanel::bottom("bottom_panel")
                 .resizable(false)
@@ -535,7 +503,7 @@ impl eframe::App for ApiTestApp {
                 });
             /* #endregion */
 
-            if let Some(ii) = self.select_api_test_index {
+            if let Some(ii) = self.select_group {
                 let group = &mut self.project.groups[ii.0];
                 let hc = &mut group.childrent[ii.1];
 
@@ -789,5 +757,154 @@ impl eframe::App for ApiTestApp {
             }
         });
         /* #endregion */
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum WindowType {
+    None,
+    AddGroup,
+    DelGroup,
+}
+
+#[derive(Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub struct WindowOptions {
+    pub title: String,
+    pub title_bar: bool,
+    pub collapsible: bool,
+    pub resizable: bool,
+    pub scroll2: [bool; 2],
+    pub disabled_time: f64,
+
+    pub anchored: bool,
+    pub anchor: egui::Align2,
+    pub anchor_offset: egui::Vec2,
+
+    pub wt: WindowType,
+
+    pub new_group_name:String,
+    pub del_group_idx: usize,
+}
+
+impl Default for WindowOptions {
+    fn default() -> Self {
+        Self {
+            title: "Model".to_owned(),
+            title_bar: true,
+            collapsible: true,
+            resizable: true,
+            scroll2: [true; 2],
+            disabled_time: f64::NEG_INFINITY,
+            anchored: false,
+            anchor: egui::Align2::CENTER_CENTER,
+            anchor_offset: egui::Vec2::ZERO,
+
+            new_group_name: Default::default(),
+            wt: WindowType::None,
+            del_group_idx: 0,
+        }
+    }
+}
+
+impl WindowOptions {
+    fn show(&mut self, ctx: &egui::Context, 
+        open: &mut bool, 
+        select_group: &mut Option<(usize, usize)>,
+        project: &mut Project) {
+        if !*open {
+            return;
+        }
+
+        let Self {
+            title,
+            title_bar,
+            collapsible,
+            resizable,
+            scroll2,
+            disabled_time,
+            anchored,
+            anchor,
+            anchor_offset,
+            ..
+        } = self.clone();
+
+        let enabled = ctx.input(|i| i.time) - disabled_time > 2.0;
+        if !enabled {
+            ctx.request_repaint();
+        }
+
+        let mut window = egui::Window::new(title)
+            .id(egui::Id::new("Window Model")) // required since we change the title
+            .open(open)
+            .resizable(resizable)
+            .collapsible(collapsible)
+            .title_bar(title_bar)
+            .scroll2(scroll2)
+            .enabled(enabled);
+
+        if anchored {
+            window = window.anchor(anchor, anchor_offset);
+        }
+        window.show(ctx, |ui| self.ui(ui,select_group, project));
+    }
+
+    fn on_add_group(&mut self,  project: &mut Project) -> bool {
+        let name = self.new_group_name.to_owned();
+        let name_exists = project.groups.iter().any(|el| el.name == name);
+        if !name_exists {
+            project.groups.push(Group::from_name(self.new_group_name.to_owned()));
+            self.new_group_name.clear();
+            return true; 
+        } else {
+            return false; 
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, select_group: &mut Option<(usize, usize)>, project: &mut Project) {
+
+        match self.wt {
+            WindowType::None => {},
+            WindowType::AddGroup => {
+                ui.horizontal(|ui| {
+                    let input_add = ui.add(
+                        egui::TextEdit::singleline(&mut self.new_group_name)
+                            .hint_text("Enter Add Group"),
+                    );
+        
+                    if input_add.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && !self.new_group_name.is_empty()
+                    {
+                        if self.on_add_group(project) {
+        
+                            
+                            input_add.request_focus();
+                        }
+                    }
+        
+                    if  ui.button("Add").clicked() {
+                        if !self.new_group_name.is_empty() {
+                            self.on_add_group(project);
+                        }
+                    }
+                });
+            },
+            WindowType::DelGroup => {
+                ui.horizontal(|ui| {
+
+                    ui.label(
+                        format!("remove group -> {}", &project.groups[self.del_group_idx].name)
+                    );
+
+                    if ui.button("Del").clicked() {
+                        *select_group = None;
+                        project.groups.remove(self.del_group_idx);
+                    }
+                });
+            },
+        }
+
+      
     }
 }
