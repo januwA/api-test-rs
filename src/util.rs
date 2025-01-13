@@ -1,27 +1,23 @@
 #![allow(warnings, unused)]
 
-use std::ffi::OsStr;
+use std::{ffi::OsStr, path::Path};
 
-use crate::{HttpConfig, HttpRequestConfig, HttpResponseUi, Promise};
-use anyhow::{anyhow, bail, Result};
+use crate::{HttpRequestConfig, HttpResponse};
+use anyhow::{bail, Result};
 use eframe::egui;
 use image::GenericImageView;
-use reqwest::RequestBuilder;
-use serde_json::json;
-use tokio::runtime::Runtime;
 
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::collections::HashMap;
 
-use crate::{AppConfig, Group, PairUi, Project};
+use crate::{AppConfig, PairUi, Project};
 
-pub fn load_app_icon() -> eframe::IconData {
+pub fn load_app_icon() -> eframe::egui::IconData {
     let app_icon_bytes = include_bytes!("../data/icon.jpg");
     let app_icon = image::load_from_memory(app_icon_bytes).expect("load icon error");
     let (app_icon_width, app_icon_height) = app_icon.dimensions();
 
-    eframe::IconData {
+    eframe::egui::IconData {
         rgba: app_icon.into_rgba8().into_vec(),
         width: app_icon_width,
         height: app_icon_height,
@@ -33,13 +29,17 @@ pub fn setup_custom_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
     // load system font
-    let Ok(font) = std::fs::read("c:/Windows/Fonts/msyh.ttc") else {
-      panic!("font not find");
-  };
+    let Ok(font) = std::fs::read(
+        // r#"c:/Windows/Fonts/consola.ttf"#
+        r#"c:/Windows/Fonts/msyhl.ttc"#,
+    ) else {
+        panic!("font not find");
+    };
 
-    fonts
-        .font_data
-        .insert("my_font".to_owned(), egui::FontData::from_owned(font));
+    fonts.font_data.insert(
+        "my_font".to_owned(),
+        egui::FontData::from_owned(font).into(),
+    );
 
     // 安装我的字体
     // fonts.font_data.insert(
@@ -86,7 +86,7 @@ pub fn load_project(project_path: &str) -> Result<Project> {
         bail!("加载路径不能为空")
     }
 
-    let load_path = std::path::Path::new(project_path);
+    let load_path = Path::new(project_path);
     if !load_path.exists() {
         bail!("文件不存在")
     }
@@ -99,12 +99,12 @@ pub fn load_project(project_path: &str) -> Result<Project> {
 /**
  * 将一块数据下载到本地
  */
-pub fn download(download_path: &str, data: &Vec<u8>) -> Result<()> {
+pub fn download(download_path: &str, data: &[u8]) -> Result<()> {
     if download_path.is_empty() {
         bail!("加载路径不能为空")
     }
 
-    let p: &std::path::Path = std::path::Path::new(&download_path);
+    let p = Path::new(&download_path);
     let p_dir = p.parent();
 
     let Some(p_dir) = p_dir else {
@@ -115,7 +115,7 @@ pub fn download(download_path: &str, data: &Vec<u8>) -> Result<()> {
         bail!("下载目录不存在")
     }
 
-    if let Err(err) = std::fs::write(p, data.as_slice()) {
+    if let Err(err) = std::fs::write(p, data) {
         bail!(err)
     }
 
@@ -135,7 +135,7 @@ pub async fn read_binary(path: &str) -> Result<Vec<u8>> {
         let dat = res.bytes().await?;
         dat.to_vec()
     } else {
-        let p = std::path::Path::new(path);
+        let p = Path::new(path);
         if !p.exists() {
             bail!("file not exists")
         }
@@ -143,7 +143,7 @@ pub async fn read_binary(path: &str) -> Result<Vec<u8>> {
     })
 }
 
-pub async fn handle_multipart(kv_vec: Vec<(String, String)>) -> Result<reqwest::multipart::Form> {
+pub async fn handle_multipart(kv_vec: &Vec<(String, String)>) -> Result<reqwest::multipart::Form> {
     use reqwest::multipart::{Form, Part};
 
     let mut form = Form::new();
@@ -172,14 +172,15 @@ pub async fn handle_multipart(kv_vec: Vec<(String, String)>) -> Result<reqwest::
     Ok(form)
 }
 
-pub fn part_vec(vec: Vec<PairUi>) -> Vec<(String, String)> {
-    vec.into_iter().filter_map(|el| el.pair()).collect()
+pub fn tuple_vec(vec: &Vec<PairUi>) -> Vec<(&str, &str)> {
+    vec.into_iter().filter_map(|el| el.tuple()).collect()
 }
 
-pub fn real_part_vec(vec: Vec<PairUi>, vars: &Vec<PairUi>) -> Vec<(String, String)> {
-    part_vec(vec)
+// 使用变量填充字符串
+pub fn real_tuple_vec(vec: &Vec<PairUi>, vars: &Vec<PairUi>) -> Vec<(String, String)> {
+    tuple_vec(vec)
         .iter()
-        .map(|x| real_pair_fn(x, vars))
+        .map(|x| real_tuple_fn(x, vars))
         .collect()
 }
 
@@ -189,7 +190,7 @@ pub fn save_project(dir: &str, project: &Project) -> Result<()> {
     };
 
     let data = serde_json::to_vec(project)?;
-    let save_path = std::path::Path::new(dir).join(format!("{}.json", &project.name));
+    let save_path = Path::new(dir).join(format!("{}.json", &project.name));
     std::fs::write(&save_path, data)?;
 
     // 在保存 .config
@@ -197,57 +198,35 @@ pub fn save_project(dir: &str, project: &Project) -> Result<()> {
         project_path: save_path.to_str().unwrap().to_string(),
     })?;
 
-    std::fs::write(
-        std::path::Path::new(dir).join("./.config.json"),
-        config_content,
-    )?;
+    std::fs::write(Path::new(dir).join("./.config.json"), config_content)?;
 
     Ok(())
 }
 
-pub async fn http_send(req_cfg: HttpRequestConfig, vars: &Vec<PairUi>) -> Result<HttpResponseUi> {
+pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Result<HttpResponse> {
     let request_builder = req_cfg.request_build(vars).await?;
-
-    let response: reqwest::Response = request_builder.send().await?;
-
+    let response = request_builder.send().await?;
     let status = response.status();
     let version = response.version();
     let headers = response.headers().to_owned();
     let data_vec = response.bytes().await.and_then(|bs| Ok(bs.to_vec())).ok();
 
-    Ok(HttpResponseUi {
+    let mut headers_str = String::new();
+    headers.iter().for_each(|(name, val)| {
+        let name = name.as_str();
+        let value = val.to_str().unwrap_or("");
+        headers_str.push_str(format!("{}: {}\n", name, value).as_str());
+    });
+
+    Ok(HttpResponse {
         data_vec,
         headers,
         version,
         status,
         img: None,
-        data: None,
+        text: None,
+        headers_str,
     })
-}
-
-pub fn http_send_promise(
-    rt: &Runtime,
-    req_cfg: HttpRequestConfig,
-    vars: Vec<PairUi>,
-) -> Promise<Result<HttpResponseUi>> {
-    let (tx, p) = Promise::new();
-
-    rt.spawn(async move {
-        match http_send(req_cfg, &vars).await {
-            Ok(data) => {
-                if let Err(_) = tx.send(Ok(data)) {
-                    println!("send err");
-                }
-            }
-            Err(err) => {
-                if let Err(_) = tx.send(Err(err)) {
-                    println!("send err");
-                }
-            }
-        }
-    });
-
-    p
 }
 
 pub fn parse_var_str(oragin_str: &str, vars: &Vec<PairUi>) -> String {
@@ -269,10 +248,9 @@ pub fn parse_var_str(oragin_str: &str, vars: &Vec<PairUi>) -> String {
             }
         })
         .to_string();
-
     r2
 }
 
-pub fn real_pair_fn((k, v): &(String, String), vars: &Vec<PairUi>) -> (String, String) {
+pub fn real_tuple_fn((k, v): &(&str, &str), vars: &Vec<PairUi>) -> (String, String) {
     (parse_var_str(k, vars), parse_var_str(v, vars))
 }

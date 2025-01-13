@@ -1,19 +1,27 @@
-// #![allow(warnings, unused)]
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![allow(warnings, unused)]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
+
+use anyhow::Result;
+use core::f32;
+use std::collections::BTreeMap;
 use std::ops::Index;
+use std::sync::Arc;
 
 use api_test_rs::*;
-use eframe::egui::CollapsingHeader;
-use eframe::egui::{self};
-use eframe::epaint::{Color32, vec2, pos2};
-use egui_extras::RetainedImage;
+use eframe::egui::style::Selection;
+use eframe::egui::{self, global_theme_preference_buttons};
+use eframe::egui::{CollapsingHeader, FontFamily, FontId, TextEdit, TextStyle, Theme};
+use eframe::epaint::{vec2, Color32};
+use image::{open, EncodableLayout};
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
+use widget::error_button;
 
 mod util;
 mod widget;
 
 /* #region const variables */
-const SEND_THREAD_COUN:usize = 2;
+const SEND_THREAD_COUN: usize = 2;
 const SAVE_DIR: &str = "./_SAVED/";
 const METHODS: [Method; 9] = [
     Method::GET,
@@ -43,7 +51,7 @@ const COLUMN_WIDTH_INITIAL: f32 = 200.0;
 const RESPONSE_TABS: [ResponseTab; 2] = [ResponseTab::Data, ResponseTab::Header];
 /* #endregion */
 
-fn main() -> Result<(), eframe::Error> {
+fn main() -> eframe::Result {
     env_logger::init();
 
     let save_dir = std::path::Path::new(SAVE_DIR);
@@ -51,34 +59,89 @@ fn main() -> Result<(), eframe::Error> {
         std::fs::create_dir_all(save_dir).unwrap();
     }
 
-    let mut options = eframe::NativeOptions::default();
-    options.icon_data = Some(util::load_app_icon());
-
-    // options.initial_window_pos = Some([0f32, 0f32].into());
-    options.min_window_size = Some([900.0, 600.0].into());
-
-    // options.fullscreen = true;
-    options.maximized = false;
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([900.0, 600.0])
+            .with_icon(util::load_app_icon())
+            .with_maximized(false),
+        ..Default::default()
+    };
 
     let config: Option<AppConfig> = AppConfig::load(SAVE_DIR).ok();
 
     eframe::run_native(
         "api test",
         options,
-        Box::new(|cc| Box::new(ApiTestApp::new(cc, config))),
+        Box::new(|cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::new(ApiTestApp::new(cc, config)))
+        }),
     )
+}
+
+fn setup_custom_style(ctx: &egui::Context) {
+    ctx.style_mut_of(Theme::Light, use_light_green_accent);
+    ctx.style_mut_of(Theme::Dark, use_dark_purple_accent);
+}
+
+fn use_light_green_accent(style: &mut eframe::egui::Style) {
+    style.visuals.hyperlink_color = Color32::from_rgb(18, 180, 85);
+    style.visuals.text_cursor.stroke.color = Color32::from_rgb(28, 92, 48);
+    style.visuals.selection = Selection {
+        bg_fill: Color32::from_rgb(157, 218, 169),
+        stroke: eframe::egui::Stroke::new(1.0, Color32::from_rgb(28, 92, 48)),
+    };
+}
+
+fn use_dark_purple_accent(style: &mut eframe::egui::Style) {
+    style.visuals.hyperlink_color = Color32::from_rgb(202, 135, 227);
+    style.visuals.text_cursor.stroke.color = Color32::from_rgb(234, 208, 244);
+    style.visuals.selection = Selection {
+        bg_fill: Color32::from_rgb(105, 67, 119),
+        stroke: eframe::egui::Stroke::new(1.0, Color32::from_rgb(234, 208, 244)),
+    };
+}
+
+#[inline]
+fn heading2() -> TextStyle {
+    TextStyle::Name("Heading2".into())
+}
+
+#[inline]
+fn heading3() -> TextStyle {
+    TextStyle::Name("ContextHeading".into())
+}
+
+fn configure_text_styles(ctx: &egui::Context) {
+    use FontFamily::{Monospace, Proportional};
+
+    let text_styles: BTreeMap<TextStyle, FontId> = [
+        (TextStyle::Heading, FontId::new(25.0, Proportional)),
+        (heading2(), FontId::new(22.0, Proportional)),
+        (heading3(), FontId::new(19.0, Proportional)),
+        (TextStyle::Body, FontId::new(16.0, Proportional)),
+        (TextStyle::Monospace, FontId::new(12.0, Monospace)),
+        (TextStyle::Button, FontId::new(12.0, Proportional)),
+        (TextStyle::Small, FontId::new(12.0, Proportional)),
+    ]
+    .into();
+    ctx.all_styles_mut(move |style| style.text_styles = text_styles.clone());
 }
 
 struct ApiTestApp {
     rt: Runtime,
+    tx: mpsc::Sender<Result<HttpResponse>>,
+    rx: mpsc::Receiver<Result<HttpResponse>>,
 
     // 加载保存的项目文件路径
     project_path: String,
-    select_group: Option<(usize, usize)>,
+    remove_group: Option<usize>,
+
+    select_test: Option<(usize, usize)>,
+    remove_test: Option<(usize, usize)>,
 
     new_project_name: String,
     new_group_name: String,
-    del_group_name: String,
 
     // 当前项目
     project: Project,
@@ -89,13 +152,18 @@ struct ApiTestApp {
     // 已保存的项目 (name, path)
     saved: Vec<(String, String)>,
 
-    open_model: bool,
-    model: WindowOptions,
+    // 美化请求的返回结果，如格式化json
+    is_pretty: bool,
+
+    pub modal: ModalOptions,
 }
 
 impl Default for ApiTestApp {
     fn default() -> Self {
+        let (tx, rx) = mpsc::channel::<Result<HttpResponse>>(32);
         Self {
+            tx,
+            rx,
             rt: tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .worker_threads(SEND_THREAD_COUN)
@@ -105,48 +173,51 @@ impl Default for ApiTestApp {
             new_project_name: Default::default(),
             action_status: Default::default(),
             saved: Default::default(),
-            del_group_name: Default::default(),
             thread_count: SEND_THREAD_COUN.to_string(),
             project_path: Default::default(),
-            select_group: Some((0, 0)),
+            select_test: Some((0, 0)),
+            remove_test: None,
             project: Project {
                 name: "Any".to_owned(),
                 groups: vec![{
-                        let mut g =   Group::from_name("Group #1".to_owned());
-                        let mut t = HttpConfig::from_name("test".to_owned());
-                        t.req_cfg.url = "{{base}}/ping".to_owned();
-                        g.childrent.push(t);
-                        g
-                    }
-                ],
+                    let mut g = Group::from_name("Group #1".to_owned());
+                    let mut t = HttpTest::from_name("test".to_owned());
+                    t.request.url = "{{base}}/ping".to_owned();
+                    g.childrent.push(t);
+                    g
+                }],
                 variables: vec![PairUi::from_kv("base", "http://127.0.0.1:3000")],
             },
-            open_model: false,
-            model: WindowOptions::default(),
+            is_pretty: true,
+            remove_group: None,
+
+            modal: Default::default(),
         }
     }
 }
 
 impl ApiTestApp {
     fn new(cc: &eframe::CreationContext<'_>, config: Option<AppConfig>) -> Self {
+        setup_custom_style(&cc.egui_ctx);
+        // configure_text_styles(&cc.egui_ctx);
         util::setup_custom_fonts(&cc.egui_ctx);
+
         let mut my = Self::default();
 
         if let Some(config) = config {
             my.project_path = config.project_path;
             my.load_project();
-            my.select_group = None;
+            my.select_test = None;
         }
         my
     }
 
     /// 保存当前正在操作的项目
     fn save_current_project(&mut self) {
-            self.action_status = match util::save_project( SAVE_DIR, &self.project) {
-                Ok(_) => "save sucsess".to_owned(),
-                Err(err) => err.to_string(),
-            };
-     
+        self.action_status = match util::save_project(SAVE_DIR, &self.project) {
+            Ok(_) => "save sucsess".to_owned(),
+            Err(err) => err.to_string(),
+        };
     }
 
     /// 获取保存的project文件列表
@@ -182,7 +253,7 @@ impl ApiTestApp {
 
         self.project = Project::from_name(&self.new_project_name);
 
-        self.select_group = None;
+        self.select_test = None;
         self.new_project_name.clear(); // clear input name
         self.project_path.clear(); // new project not save
     }
@@ -192,7 +263,7 @@ impl ApiTestApp {
         match util::load_project(&self.project_path) {
             Ok(project) => {
                 self.project = project;
-                self.select_group = None;
+                self.select_test = None;
                 self.action_status = "Load project success".to_owned();
             }
             Err(err) => {
@@ -200,24 +271,14 @@ impl ApiTestApp {
             }
         }
     }
-}
 
-impl eframe::App for ApiTestApp {
-    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
-        self.save_current_project();
-        self.action_status = "auto save".to_owned();
-    }
-
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-
-        self.model.show(ctx, &mut self.open_model, &mut self.select_group, &mut self.project);
-
-        /* #region top menus */
+    // top menus
+    fn ui_top_menus(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Quit").clicked() {
-                        frame.close();
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
 
@@ -225,7 +286,8 @@ impl eframe::App for ApiTestApp {
                     ui.horizontal(|ui| {
                         let input = ui.add(
                             egui::TextEdit::singleline(&mut self.new_project_name)
-                                .hint_text("Enter Create Project"),
+                                .hint_text("Enter Create Project")
+                                .desired_width(100.0),
                         );
 
                         if input.lost_focus()
@@ -237,47 +299,30 @@ impl eframe::App for ApiTestApp {
                     });
 
                     ui.separator();
-
-                    if ui.add(egui::Button::new("Add Group")).clicked() {
-                        self.model.wt = WindowType::AddGroup;
-                        self.open_model = true;
+                    if ui.add(egui::Button::new("Save Project")).clicked() {
+                        self.save_current_project();
                         ui.close_menu();
                     }
 
                     ui.separator();
-                   
-                        if ui.add(egui::Button::new("Save Current Project").min_size(vec2( ui.max_rect().width(), 30.0))).clicked() {
-                            self.save_current_project();
-                            ui.close_menu();
+                    if ui.add(egui::Button::new("Load Project")).clicked() {
+                        self.modal.open = true;
+                        self.modal.title = "Load Project".to_owned();
+                        self.modal.r#type = ModalType::LoadProject;
+                        if let Ok(saved) = self.load_saved_project() {
+                            self.saved = saved;
                         }
-                });
-
-                let saved_menu = ui.menu_button("Saved", |ui| {
-                    ui.vertical(|ui| {
-                        for i in 0..self.saved.len() {
-                            let (name, path) = self.saved.index(i);
-                            if ui.selectable_label(false, name).clicked() {
-                                self.project_path = path.to_owned();
-                                self.load_project();
-                                ui.close_menu();
-                            }
-
-                            ui.separator();
-                        }
-                    });
-                });
-
-                if saved_menu.response.clicked() {
-                    if let Ok(saved) = self.load_saved_project() {
-                        self.saved = saved;
                     }
-                }
+                });
 
                 ui.menu_button("Setting", |ui| {
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label("Thread Count");
-                            ui.text_edit_singleline(&mut self.thread_count);
+                            // ui.text_edit_singleline(&mut self.thread_count);
+                            TextEdit::singleline(&mut self.thread_count)
+                                .desired_width(50.0)
+                                .show(ui);
                             if ui.button("Set").clicked() {
                                 match self.thread_count.parse::<usize>() {
                                     Ok(count) => {
@@ -303,13 +348,14 @@ impl eframe::App for ApiTestApp {
                                 }
                             }
                         });
+                        ui.separator();
+                        global_theme_preference_buttons(ui);
                     });
                 });
             });
         });
-        /* #endregion */
-
-        /* #region left panel */
+    }
+    fn ui_left_panel(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("left_panel")
             .resizable(true)
             .default_width(220.0)
@@ -319,85 +365,93 @@ impl eframe::App for ApiTestApp {
                     ui.heading(&self.project.name);
                 });
 
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::ScrollArea::both().show(ui, |ui| {
                     CollapsingHeader::new("Variables")
-                    .default_open(false)
-                    .show(ui, |ui| {
-
-                        ui.vertical(|ui| {
+                        .default_open(false)
+                        .show(ui, |ui| {
                             if ui.button("Add").clicked() {
                                 self.project.variables.push(PairUi::default());
                             }
-                        });
-                    
-                        ui.separator();
-                    
-                        egui_extras::StripBuilder::new(ui)
-                            .size(egui_extras::Size::remainder().at_most(120.0))
-                            .vertical(|mut strip| {
-                                strip.cell(|ui| {
-                                        let  table = egui_extras::TableBuilder::new(ui)
-                                            .striped(true)
-                                            .resizable(true)
-                                            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                                            .column(egui_extras::Column::auto())
-                                            .column(egui_extras::Column::auto().range(100.0..=400.0))
-                                            .column(egui_extras::Column::auto().range(100.0..=400.0))
-                                            .column(egui_extras::Column::auto())
-                                            .min_scrolled_height(10.0)
-                                            // .scroll_to_row(1, Some(egui::Align::BOTTOM))
-                                            ;
-                    
-                                        table
-                                            .header(20.0, |mut header| {
-                                                header.col(|ui| {
-                                                    ui.strong("");
-                                                });
-                                                header.col(|ui| {
-                                                    ui.strong("Key");
-                                                });
-                                                header.col(|ui| {
-                                                    ui.strong("Value");
-                                                });
-                                            })
-                                            .body(|mut body| {
-                                                self.project.variables.retain_mut(|el| {
-                                                    let mut r = true;
-                    
-                                                    body.row(30.0, |mut row| {
-                                                        row.col(|ui| {
-                                                            ui.checkbox(&mut el.disable, "");
-                                                        });
-                    
-                                                        row.col(|ui| {
-                                                            ui.add(
-                                                                egui::TextEdit::singleline(&mut el.key)
-                                                                    .desired_width(f32::INFINITY),
-                                                            );
-                                                        });
-                    
-                                                        row.col(|ui| {
-                                                            ui.add(
-                                                                egui::TextEdit::singleline(&mut el.value)
-                                                                    .desired_width(f32::INFINITY),
-                                                            );
-                                                        });
-                    
-                                                        row.col(|ui| {
-                                                            if ui.button("Del").clicked() {
-                                                                r = false;
-                                                            }
-                                                        });
-                                                    });
-                                                    r
-                                                });
-                                            })
+
+                            ui.separator();
+
+                            egui_extras::TableBuilder::new(ui)
+                                .striped(true)
+                                .resizable(true)
+                                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                                .column(egui_extras::Column::auto())
+                                .column(egui_extras::Column::auto())
+                                .column(egui_extras::Column::auto().range(100.0..=400.0))
+                                .column(egui_extras::Column::auto())
+                                .min_scrolled_height(10.0)
+                                // .scroll_to_row(1, Some(egui::Align::BOTTOM))
+                                .header(20.0, |mut header| {
+                                    header.col(|ui| {
+                                        ui.label("");
+                                    });
+                                    header.col(|ui| {
+                                        ui.label("Key");
+                                    });
+                                    header.col(|ui| {
+                                        ui.label("Value");
+                                    });
+                                    header.col(|ui| {
+                                        ui.label("");
+                                    });
+                                })
+                                .body(|mut body| {
+                                    self.project.variables.retain_mut(|el| {
+                                        let mut is_retain = true;
+                                        body.row(30.0, |mut row| {
+                                            row.col(|ui| {
+                                                ui.checkbox(&mut el.disable, "");
+                                            });
+
+                                            row.col(|ui| {
+                                                ui.add(
+                                                    egui::TextEdit::singleline(&mut el.key)
+                                                        .desired_width(f32::INFINITY),
+                                                );
+                                            });
+
+                                            row.col(|ui| {
+                                                ui.add(
+                                                    egui::TextEdit::singleline(&mut el.value)
+                                                        .desired_width(f32::INFINITY),
+                                                );
+                                            });
+
+                                            row.col(|ui| {
+                                                if error_button(ui, "Del").clicked() {
+                                                    is_retain = false;
+                                                }
+                                            });
+                                        });
+                                        is_retain
+                                    });
                                 });
-                            });
-                    });
+                        });
                     ui.separator();
 
-                    self.project.groups
+                    let input_add = ui.add(
+                        egui::TextEdit::singleline(&mut self.new_group_name)
+                            .hint_text("Enter Add Group"),
+                    );
+
+                    if input_add.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && !self.new_group_name.is_empty()
+                    {
+                        let name = self.new_group_name.to_owned();
+                        let name_exists = self.project.groups.iter().any(|el| el.name == name);
+                        if !name_exists {
+                            self.project.groups.push(Group::from_name(name));
+                            self.new_group_name.clear();
+                        }
+                    }
+
+                    self.project
+                        .groups
                         .iter_mut()
                         .enumerate()
                         .for_each(|(group_index, group)| {
@@ -405,70 +459,48 @@ impl eframe::App for ApiTestApp {
                             CollapsingHeader::new(&group.name)
                                 .default_open(false)
                                 .show(ui, |ui| {
-                                    ui.menu_button("...", |ui| {
-
-                                        if ui.button("Del Group").clicked() {
-                                            self.model.wt = WindowType::DelGroup;
-                                            self.model.del_group_idx =group_index;
-                                            self.open_model = true;
+                                    ui.horizontal(|ui| {
+                                        if ui.button("...").clicked() {
+                                            self.modal.open = true;
+                                            self.modal.title = "Group Edit".to_owned();
+                                            self.select_test = Some((group_index, 0));
+                                            self.modal.r#type = ModalType::HandleGroup;
                                         }
-
-                                        let input_add = ui.add(
-                                            egui::TextEdit::singleline(&mut group.new_child_name)
-                                                .desired_width(120.0)
-                                                .hint_text("Enter Add Test"),
-                                        );
-
-                                        if input_add.lost_focus()
-                                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                            && !group.new_child_name.is_empty()
-                                        {
-                                            group.create_child();
-                                            self.action_status = "添加成功".to_owned();
-                                            input_add.request_focus();
-                                        }
-
-                                        ui.separator();
-
-                                        let input_del = ui.add(
-                                            egui::TextEdit::singleline(&mut group.del_child_name)
-                                                .desired_width(120.0)
-                                                .hint_text("Enter Del Test"),
-                                        );
-
-                                        if input_del.lost_focus()
-                                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                                            && !group.del_child_name.is_empty()
-                                        {
-                                            self.select_group = None;
-                                            group.del_child();
-                                            input_del.request_focus();
-                                        }
-
-                                        // TODO:
-                                        ui.text_edit_singleline(&mut group.name);
                                     });
                                     ui.separator();
 
                                     ui.with_layout(
                                         egui::Layout::top_down_justified(egui::Align::Min),
                                         |ui| {
-                                            group.childrent.iter().enumerate().rev().for_each(
+                                            group.childrent.iter_mut().enumerate().rev().for_each(
                                                 |(cfg_i, cfg)| {
-                                                    let checked = match self.select_group {
+                                                    let checked = match self.select_test {
                                                         Some((i, j)) => {
                                                             i == group_index && j == cfg_i
                                                         }
                                                         _ => false,
                                                     };
 
-                                                    if ui
-                                                        .selectable_label(checked, &cfg.name)
-                                                        .clicked()
-                                                    {
-                                                        self.select_group =
-                                                            Some((group_index, cfg_i));
-                                                    }
+                                                    ui.horizontal(|ui| {
+                                                        if ui
+                                                            .selectable_label(checked, &cfg.name)
+                                                            .clicked()
+                                                        {
+                                                            self.select_test =
+                                                                Some((group_index, cfg_i));
+                                                        }
+
+                                                        if ui.button("...").clicked() {
+                                                            self.modal.open = true;
+                                                            self.modal.title =
+                                                                "Test Edit".to_owned();
+                                                            self.select_test =
+                                                                Some((group_index, cfg_i));
+                                                            self.modal.r#type =
+                                                                ModalType::HandleTest;
+                                                        }
+                                                    });
+
                                                     ui.separator();
                                                 },
                                             );
@@ -478,433 +510,471 @@ impl eframe::App for ApiTestApp {
                         });
                 });
             });
-        /* #endregion */
-
-        // egui::SidePanel::right("right_panel")
-        //     .resizable(true)
-        //     .default_width(120.0)
-        //     .width_range(0.0..=400.0)
-        //     .show(ctx, |ui| {
-        //     });
-
-        /* #region center panel */
+    }
+    fn ui_right_panel(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-
-
-
-            /* #region action bar */
             egui::TopBottomPanel::bottom("bottom_panel")
                 .resizable(false)
                 .show_inside(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Action Status:");
+                        ui.label("Action:");
                         ui.label(&self.action_status);
                     });
                 });
-            /* #endregion */
 
-            if let Some(ii) = self.select_group {
-                let group = &mut self.project.groups[ii.0];
-                let hc = &mut group.childrent[ii.1];
+            egui::ScrollArea::both()
+                .id_salt("right panel")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let Some((i, ii)) = self.select_test else {
+                        return;
+                    };
+                    let Some(group) = self.project.groups.get_mut(i) else {
+                        return;
+                    };
+                    let Some(http_test) = group.childrent.get_mut(ii) else {
+                        return;
+                    };
 
-                ui.horizontal(|ui| {
-                    egui::TextEdit::singleline(&mut hc.name)
-                        .desired_width(100.0)
-                        .show(ui);
-                    egui::ComboBox::from_id_source("method")
-                        .selected_text(hc.req_cfg.method.as_ref())
-                        .show_ui(ui, |ui| {
-                            for m in &METHODS {
-                                ui.selectable_value(
-                                    &mut hc.req_cfg.method,
-                                    m.to_owned(),
-                                    m.as_ref(),
-                                );
+                    // 渲染时尝试获取请求返回值，如果不渲染就不会去获取，其它方法使用Arc+Mutex
+                    match self.rx.try_recv() {
+                        Ok(data) => match data {
+                            Ok(res) => {
+                                http_test.s_e.0 += 1;
+                                // TODO: 使用lua脚本让使用者自行判断该请求是成功还是失败
+                                if http_test.response.is_none() {
+                                    http_test.response = Some(res);
+                                } else {
+                                    // httpConfig.response_vec.push(res);
+                                }
                             }
-                        });
-
-                    ui.add(
-                        egui::TextEdit::singleline(&mut hc.req_cfg.url)
-                            .desired_width(400.)
-                            .hint_text("http url"),
-                    );
-
-                    ui.add(
-                        egui::TextEdit::singleline(&mut hc.send_count_ui)
-                            .desired_width(60.)
-                            .hint_text("Count"),
-                    );
-
-                    if ui
-                        .add_enabled(!hc.req_cfg.url.is_empty(), egui::Button::new("Send"))
-                        .clicked()
-                    {
-                        // get send count
-                        hc.send_count = hc.send_count_ui.parse().unwrap_or(0);
-                        let capacity = hc.send_count;
-
-                        // clear old data
-                        hc.response_promise = None;
-                        hc.response_promise_vec.clear();
-                        hc.s_e_r = (0, 0, 0);
-
-                        // init result vec size
-                        hc.response_promise_vec = Vec::with_capacity(capacity);
-
-                        for _ in 0..capacity {
-                            hc.response_promise_vec.push(util::http_send_promise(&self.rt, hc.req_cfg.to_owned(), self.project.variables.to_owned() ));
+                            Err(_) => {
+                                http_test.s_e.1 += 1;
+                            }
+                        },
+                        Err(_) => {
+                            // 没有消息，或其他错误
                         }
                     }
 
-                    ui.separator();
+                    // 请求方式
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("method")
+                            .selected_text(http_test.request.method.as_ref())
+                            .show_ui(ui, |ui| {
+                                for m in &METHODS {
+                                    ui.selectable_value(
+                                        &mut http_test.request.method,
+                                        m.to_owned(),
+                                        m.as_ref(),
+                                    );
+                                }
+                            });
 
-                    // request result count
-                    let (s, e, r) = hc.get_request_reper();
-                    ui.label(format!("s:{s}, e:{e}, r:{r}"));
-
-                    ui.separator();
-                });
-                ui.separator();
-
-                widget::horizontal_tabs(ui, REQ_TABS.iter(), &mut hc.tab_ui);
-                ui.separator();
-
-                match hc.tab_ui {
-                    RequestTab::Params => {
-                        widget::pair_table(ui, "param scroll", &mut hc.req_cfg.query);
-                    }
-                    RequestTab::Headers => {
-                        widget::pair_table(ui, "header scroll", &mut hc.req_cfg.header);
-                    }
-                    RequestTab::Body => {
-                        widget::horizontal_tabs(
-                            ui,
-                            REQ_BODY_TABS.iter(),
-                            &mut hc.req_cfg.body_tab_ui,
+                        ui.add(
+                            egui::TextEdit::singleline(&mut http_test.request.url)
+                                .desired_width(300.)
+                                .hint_text("http url"),
                         );
+
+                        ui.add(
+                            egui::TextEdit::singleline(&mut http_test.send_count_ui)
+                                .desired_width(60.)
+                                .hint_text("Count"),
+                        );
+
+                        if ui
+                            .add_enabled(
+                                !http_test.request.url.is_empty(),
+                                egui::Button::new("Send"),
+                            )
+                            .clicked()
+                        {
+                            http_test.send_before_init();
+
+                            if http_test.send_count <= 0 {
+                                return;
+                            }
+
+                            let cfg = Arc::new(http_test.request.to_owned());
+                            let variables = Arc::new(self.project.variables.to_owned());
+
+                            for _ in 0..http_test.send_count {
+                                let req_cfg = cfg.clone();
+                                let vars = variables.clone();
+                                let tx = self.tx.clone();
+                                self.rt.spawn(async move {
+                                    match tx.send(util::http_send(&*req_cfg, &*vars).await).await {
+                                        Ok(_) => {
+                                            // println!("send ok");
+                                        }
+                                        Err(_) => {
+                                            println!("send err");
+                                        }
+                                    };
+                                });
+                            }
+                        }
+
                         ui.separator();
 
-                        match hc.req_cfg.body_tab_ui {
-                            RequestBodyTab::Raw => {
-                                ui.vertical(|ui| {
-                                    ui.group(|ui| {
-                                        ui.horizontal(|ui| {
-                                            REQ_BODY_RAW_TYPES.iter().for_each(|raw_type| {
-                                                ui.radio_value(
-                                                    &mut hc.req_cfg.body_raw_type,
-                                                    raw_type.to_owned(),
-                                                    raw_type.as_ref(),
-                                                );
-                                            });
-                                        });
-                                    });
+                        // request result count
+                        let (s, e) = &http_test.s_e;
+                        ui.label(format!("s:{s}, e:{e}"));
 
-                                    egui::ScrollArea::vertical()
-                                        .id_source("row data scroll")
-                                        .max_height(120.0)
-                                        .show(ui, |ui| {
-                                            ui.add(
-                                                egui::TextEdit::multiline(&mut hc.req_cfg.body_raw)
-                                                    .desired_rows(6),
-                                            );
-                                        });
-                                });
-                            }
+                        ui.separator();
+                    });
+                    ui.separator();
 
-                            RequestBodyTab::Form => {
-                                widget::pair_table(
-                                    ui,
-                                    "body_form scroll",
-                                    &mut hc.req_cfg.body_form,
-                                );
-                            }
+                    // 请求数据
+                    widget::horizontal_tabs(ui, REQ_TABS.iter(), &mut http_test.tab_ui);
+                    ui.separator();
 
-                            RequestBodyTab::FormData => {
-                                widget::pair_table(
-                                    ui,
-                                    "body_form scroll",
-                                    &mut hc.req_cfg.body_form_data,
-                                );
-                            }
+                    match http_test.tab_ui {
+                        RequestTab::Params => {
+                            widget::pair_table(ui, "param scroll", &mut http_test.request.query);
                         }
-                    }
-                };
-
-                ui.separator();
-
-                if let Some(promise) = &mut hc.response_promise {
-                    match promise.read_mut() {
-                        PromiseStatus::PADING => {
-                            ui.spinner();
+                        RequestTab::Headers => {
+                            widget::pair_table(ui, "header scroll", &mut http_test.request.header);
                         }
-                        PromiseStatus::Rejected(err) => {
-                            widget::error_label(ui, &err.to_string());
-                        }
-                        PromiseStatus::Fulfilled(response) => match response {
-                            Ok(response) => {
-                                // 初始化图片或则字符串数据
-                                if let Some(data_vec) = &response.data_vec {
-                                    if response.content_type_image() {
-                                        response.img.get_or_insert_with(|| RetainedImage::from_image_bytes("", data_vec.as_ref()) );
-                                    } else {
-                                        response.data.get_or_insert_with(||
-                                            std::str::from_utf8(data_vec.as_ref())
-                                                .unwrap_or("")
-                                                .to_owned()
-                                        );
-                                    }
-                                }
+                        RequestTab::Body => {
+                            widget::horizontal_tabs(
+                                ui,
+                                REQ_BODY_TABS.iter(),
+                                &mut http_test.request.body_tab_ui,
+                            );
+                            ui.separator();
 
-                                ui.horizontal(|ui| {
-                                    ui.heading(format!(
-                                        "Response Status: {:?} {}",
-                                        response.version, response.status
-                                    ));
-
-                                    ui.separator();
-
-                                    if let Some(data_vec) = &response.data_vec {
-                                        ui.add(
-                                            egui::TextEdit::singleline(&mut hc.download_path)
-                                                .hint_text(r#"c:/out.jpg"#),
-                                        );
-                                        if ui
-                                            .add_enabled(
-                                                !hc.download_path.is_empty(),
-                                                egui::Button::new("Download Body"),
-                                            )
-                                            .clicked()
-                                        {
-                                            match util::download(&hc.download_path, data_vec) {
-                                                Ok(_) => {
-                                                    self.action_status = "Downlaod Ok".to_owned();
-                                                }
-                                                Err(err) => {
-                                                    self.action_status = err.to_string();
-                                                }
-                                            }
-                                        }
-                                    }
-                                });
-                                ui.separator();
-
-                                widget::horizontal_tabs(
-                                    ui,
-                                    RESPONSE_TABS.iter(),
-                                    &mut hc.response_tab_ui,
-                                );
-                                ui.separator();
-
-                                match hc.response_tab_ui {
-                                    ResponseTab::Data => match &response.data_vec {
-                                        Some(_) => {
-                                            egui::ScrollArea::vertical()
-                                                .hscroll(true)
-                                                .id_source("response data scroll")
-                                                .auto_shrink([false, false])
-                                                .show(ui, |ui| {
-                                                    if let Some(img_data) = &response.img {
-                                                        match img_data {
-                                                            Ok(image) => {
-                                                                image.show(ui);
-                                                            }
-                                                            Err(err) => {
-                                                                widget::error_label(
-                                                                    ui,
-                                                                    &err.to_string(),
-                                                                );
-                                                            }
-                                                        }
-                                                    } else if let Some(text_data) = &response.data {
-                                                        widget::code_view_ui(ui, text_data);
-                                                    } else {
-                                                        widget::error_label(ui, "其他类型");
-                                                    }
-                                                });
-                                        }
-                                        _ => {
-                                            widget::error_label(ui, "NOT DATA");
-                                        }
-                                    },
-                                    ResponseTab::Header => {
-                                        egui::ScrollArea::vertical()
-                                            .hscroll(true)
-                                            .id_source("response heaer scroll")
-                                            .auto_shrink([false, false])
-                                            .show(ui, |ui| {
-                                                ui.vertical(|ui| {
-                                                    response.headers.iter().for_each(
-                                                        |(name, val)| {
-                                                            let name = name.as_str();
-                                                            let value = val.to_str().unwrap_or("");
-                                                            widget::code_view_ui(
-                                                                ui,
-                                                                &format!("{}: {}", name, value),
-                                                            );
-                                                        },
+                            match http_test.request.body_tab_ui {
+                                RequestBodyTab::Raw => {
+                                    ui.vertical(|ui| {
+                                        ui.group(|ui| {
+                                            ui.horizontal(|ui| {
+                                                REQ_BODY_RAW_TYPES.iter().for_each(|raw_type| {
+                                                    ui.radio_value(
+                                                        &mut http_test.request.body_raw_type,
+                                                        raw_type.to_owned(),
+                                                        raw_type.as_ref(),
                                                     );
                                                 });
                                             });
+                                        });
+
+                                        egui::ScrollArea::both()
+                                            .id_salt("row data scroll")
+                                            .max_height(120.0)
+                                            .show(ui, |ui| {
+                                                ui.add(
+                                                    egui::TextEdit::multiline(
+                                                        &mut http_test.request.body_raw,
+                                                    )
+                                                    .desired_rows(6),
+                                                );
+                                            });
+                                    });
+                                }
+
+                                RequestBodyTab::Form => {
+                                    widget::pair_table(
+                                        ui,
+                                        "body_form scroll",
+                                        &mut http_test.request.body_form,
+                                    );
+                                }
+
+                                RequestBodyTab::FormData => {
+                                    widget::pair_table(
+                                        ui,
+                                        "body_form scroll",
+                                        &mut http_test.request.body_form_data,
+                                    );
+                                }
+                            }
+                        }
+                    };
+
+                    ui.separator();
+
+                    // 请求结果
+                    let Some(response) = &mut http_test.response else {
+                        return;
+                    };
+                    // 从字节码中初始化数据
+                    if let Some(data_vec) = &response.data_vec {
+                        let isjson = response.content_type_json();
+                        let isimg = response.content_type_image();
+
+                        // 初始化图片或字符串数据
+                        if isimg {
+                            response.img.get_or_insert_with(|| {
+                                ui.ctx().forget_image("bytes://");
+                                ()
+                            });
+                        } else {
+                            response.text.get_or_insert_with(|| {
+                                let mut data = std::str::from_utf8(data_vec.as_ref())
+                                    .unwrap_or("")
+                                    .to_owned();
+
+                                if self.is_pretty && isjson {
+                                    let j: serde_json::Value = serde_json::from_str(&data).unwrap();
+                                    data = serde_json::to_string_pretty(&j).unwrap();
+                                }
+
+                                data
+                            });
+                        }
+                    }
+
+                    // 请求返回状态
+                    ui.horizontal(|ui| {
+                        ui.heading(format!(
+                            "Response Status: {:?} {}",
+                            response.version, response.status
+                        ));
+
+                        ui.separator();
+
+                        if let Some(data_vec) = &response.data_vec {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut http_test.download_path)
+                                    .hint_text(r#"c:/out.(jpg|txt)"#),
+                            );
+                            if ui
+                                .add_enabled(
+                                    !http_test.download_path.is_empty(),
+                                    egui::Button::new(match http_test.response_tab_ui {
+                                        ResponseTab::Data => "Download Data",
+                                        ResponseTab::Header => "Download Header",
+                                    }),
+                                )
+                                .clicked()
+                            {
+                                match util::download(
+                                    &http_test.download_path,
+                                    match http_test.response_tab_ui {
+                                        ResponseTab::Data => data_vec,
+                                        ResponseTab::Header => response.headers_str.as_bytes(),
+                                    },
+                                ) {
+                                    Ok(_) => {
+                                        self.action_status = "Downlaod Ok".to_owned();
+                                    }
+                                    Err(err) => {
+                                        self.action_status = err.to_string();
                                     }
                                 }
                             }
-                            Err(err) => {
-                                widget::error_label(ui, &err.to_string());
+                        }
+                    });
+                    ui.separator();
+
+                    // 查看请求返回的数据和header
+                    widget::horizontal_tabs(
+                        ui,
+                        RESPONSE_TABS.iter(),
+                        &mut http_test.response_tab_ui,
+                    );
+                    ui.separator();
+
+                    match http_test.response_tab_ui {
+                        ResponseTab::Data => match &response.data_vec {
+                            Some(data_vec) => {
+                                let isimg = response.content_type_image();
+                                if !isimg {
+                                    if ui.radio(self.is_pretty, "Pretty").clicked() {
+                                        self.is_pretty = !self.is_pretty;
+                                    }
+                                }
+                                ui.separator();
+                                egui::ScrollArea::both()
+                                    .hscroll(true)
+                                    .vscroll(true)
+                                    .id_salt("response data scroll")
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        if let Some(_) = &response.img {
+                                            ui.add(
+                                                egui::Image::from_bytes(
+                                                    "bytes://",
+                                                    data_vec.as_bytes().to_owned(),
+                                                )
+                                                .rounding(5.0),
+                                            );
+                                        } else if let Some(text_data) = response.text.as_ref() {
+                                            widget::code_view_ui(ui, text_data);
+                                        } else {
+                                            widget::error_label(ui, "其他类型");
+                                        }
+                                    });
+                            }
+                            _ => {
+                                widget::error_label(ui, "NOT DATA");
                             }
                         },
+                        ResponseTab::Header => {
+                            egui::ScrollArea::both()
+                                .hscroll(true)
+                                .vscroll(true)
+                                .id_salt("response heaer scroll")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.vertical(|ui| {
+                                        widget::code_view_ui(ui, &response.headers_str);
+                                    });
+                                });
+                        }
                     }
-                };
-            }
+                });
         });
-        /* #endregion */
+    }
+
+    fn ui_modal(&mut self, ctx: &egui::Context) {
+        if self.modal.open {
+            let enabled = ctx.input(|i| i.time) - &self.modal.disabled_time > 2.0;
+            if !enabled {
+                ctx.request_repaint();
+            }
+
+            egui::Window::new(&self.modal.title)
+                .id(egui::Id::new("Window Model")) // required since we change the title
+                // .open(&mut self.modal.open)
+                .open(&mut self.modal.open)
+                .resizable(true)
+                .collapsible(true)
+                .title_bar(true)
+                .scroll([true; 2])
+                .enabled(enabled)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| match self.modal.r#type {
+                    ModalType::None => {}
+                    ModalType::HandleGroup => {
+                        let Some((i, _)) = &self.select_test else {
+                            return;
+                        };
+                        let Some(group) = self.project.groups.get_mut(*i) else {
+                            return;
+                        };
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Edit Name");
+                                egui::TextEdit::singleline(&mut group.name).show(ui);
+                            });
+                            ui.separator();
+                            if error_button(ui, format!("Del Group({})", &group.name)).clicked() {
+                                self.remove_group = Some(*i);
+                            }
+                            ui.separator();
+                            let input_add = ui.add(
+                                egui::TextEdit::singleline(&mut group.new_child_name)
+                                    .hint_text("Enter Add Test"),
+                            );
+                            if input_add.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                && !group.new_child_name.is_empty()
+                            {
+                                group.create_child();
+                                input_add.request_focus();
+                            }
+                        });
+                    }
+                    ModalType::HandleTest => {
+                        let Some((i, ii)) = &self.select_test else {
+                            return;
+                        };
+                        let Some(group) = self.project.groups.get_mut(*i) else {
+                            return;
+                        };
+                        let Some(http_test) = group.childrent.get_mut(*ii) else {
+                            return;
+                        };
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Edit Name");
+                                egui::TextEdit::singleline(&mut http_test.name).show(ui);
+                            });
+                            ui.separator();
+                            if error_button(ui, format!("Del Test({})", &http_test.name)).clicked()
+                            {
+                                self.remove_test = Some((*i, *ii));
+                            }
+                        });
+                    }
+                    ModalType::LoadProject => {
+                        ui.vertical(|ui| {
+                            for i in 0..self.saved.len() {
+                                let (name, path) = self.saved.index(i);
+                                if ui.button(name).clicked() {
+                                    self.project_path = path.to_owned();
+                                    match util::load_project(&self.project_path) {
+                                        Ok(project) => {
+                                            self.project = project;
+                                            self.select_test = None;
+                                            self.action_status = "Load project success".to_owned();
+                                        }
+                                        Err(err) => {
+                                            self.action_status = err.to_string();
+                                        }
+                                    }
+                                }
+                                ui.separator();
+                            }
+                        });
+                    }
+                });
+        }
+    }
+}
+
+impl eframe::App for ApiTestApp {
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        self.save_current_project();
+        self.action_status = "auto save".to_owned();
+    }
+
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 删除group
+        if let Some(i) = self.remove_group {
+            self.project.groups.remove(i);
+            self.remove_group = None
+        }
+
+        // 删除group.children
+        if let Some((i, ii)) = self.remove_test {
+            self.project.groups[i].childrent.remove(ii);
+            self.remove_test = None
+        }
+
+        self.ui_modal(ctx);
+        self.ui_top_menus(ctx);
+        self.ui_left_panel(ctx);
+        self.ui_right_panel(ctx);
     }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-pub enum WindowType {
+pub enum ModalType {
     None,
-    AddGroup,
-    DelGroup,
+    HandleGroup,
+    HandleTest,
+    LoadProject,
 }
 
-#[derive(Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-pub struct WindowOptions {
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ModalOptions {
+    pub open: bool,
     pub title: String,
-    pub title_bar: bool,
-    pub collapsible: bool,
-    pub resizable: bool,
-    pub scroll2: [bool; 2],
     pub disabled_time: f64,
-
-    pub anchored: bool,
-    pub anchor: egui::Align2,
-    pub anchor_offset: egui::Vec2,
-
-    pub wt: WindowType,
-
-    pub new_group_name:String,
-    pub del_group_idx: usize,
+    pub r#type: ModalType,
 }
 
-impl Default for WindowOptions {
+impl Default for ModalOptions {
     fn default() -> Self {
         Self {
+            open: false,
             title: "Model".to_owned(),
-            title_bar: true,
-            collapsible: true,
-            resizable: true,
-            scroll2: [true; 2],
             disabled_time: f64::NEG_INFINITY,
-            anchored: false,
-            anchor: egui::Align2::CENTER_CENTER,
-            anchor_offset: egui::Vec2::ZERO,
-
-            new_group_name: Default::default(),
-            wt: WindowType::None,
-            del_group_idx: 0,
+            r#type: ModalType::None,
         }
-    }
-}
-
-impl WindowOptions {
-    fn show(&mut self, ctx: &egui::Context, 
-        open: &mut bool, 
-        select_group: &mut Option<(usize, usize)>,
-        project: &mut Project) {
-        if !*open {
-            return;
-        }
-
-        let Self {
-            title,
-            title_bar,
-            collapsible,
-            resizable,
-            scroll2,
-            disabled_time,
-            anchored,
-            anchor,
-            anchor_offset,
-            ..
-        } = self.clone();
-
-        let enabled = ctx.input(|i| i.time) - disabled_time > 2.0;
-        if !enabled {
-            ctx.request_repaint();
-        }
-
-        let mut window = egui::Window::new(title)
-            .id(egui::Id::new("Window Model")) // required since we change the title
-            .open(open)
-            .resizable(resizable)
-            .collapsible(collapsible)
-            .title_bar(title_bar)
-            .scroll2(scroll2)
-            .enabled(enabled);
-
-        if anchored {
-            window = window.anchor(anchor, anchor_offset);
-        }
-        window.show(ctx, |ui| self.ui(ui,select_group, project));
-    }
-
-    fn on_add_group(&mut self,  project: &mut Project) -> bool {
-        let name = self.new_group_name.to_owned();
-        let name_exists = project.groups.iter().any(|el| el.name == name);
-        if !name_exists {
-            project.groups.push(Group::from_name(self.new_group_name.to_owned()));
-            self.new_group_name.clear();
-            return true; 
-        } else {
-            return false; 
-        }
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, select_group: &mut Option<(usize, usize)>, project: &mut Project) {
-
-        match self.wt {
-            WindowType::None => {},
-            WindowType::AddGroup => {
-                ui.horizontal(|ui| {
-                    let input_add = ui.add(
-                        egui::TextEdit::singleline(&mut self.new_group_name)
-                            .hint_text("Enter Add Group"),
-                    );
-        
-                    if input_add.lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        && !self.new_group_name.is_empty()
-                    {
-                        if self.on_add_group(project) {
-        
-                            
-                            input_add.request_focus();
-                        }
-                    }
-        
-                    if  ui.button("Add").clicked() {
-                        if !self.new_group_name.is_empty() {
-                            self.on_add_group(project);
-                        }
-                    }
-                });
-            },
-            WindowType::DelGroup => {
-                ui.horizontal(|ui| {
-
-                    ui.label(
-                        format!("remove group -> {}", &project.groups[self.del_group_idx].name)
-                    );
-
-                    if ui.button("Del").clicked() {
-                        *select_group = None;
-                        project.groups.remove(self.del_group_idx);
-                    }
-                });
-            },
-        }
-
-      
     }
 }

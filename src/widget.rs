@@ -1,3 +1,5 @@
+use core::f32;
+
 use crate::COLUMN_WIDTH_INITIAL;
 use api_test_rs::PairUi;
 use eframe::{
@@ -6,7 +8,7 @@ use eframe::{
 };
 
 pub fn error_button(ui: &mut Ui, text: impl Into<String>) -> Response {
-    ui.add(egui::Button::new(RichText::new(text).color(Color32::WHITE)).fill(Color32::RED))
+    ui.add(egui::Button::new(RichText::new(text).color(Color32::BLACK)).fill(Color32::ORANGE))
 }
 
 pub fn error_label(ui: &mut Ui, text: impl Into<String>) -> Response {
@@ -29,7 +31,7 @@ pub fn pair_table(ui: &mut Ui, id: impl std::hash::Hash, pair_vec: &mut Vec<Pair
         // .size(egui_extras::Size::initial(200.0)) // for the table
         .vertical(|mut strip| {
             strip.cell(|ui| {
-                egui::ScrollArea::vertical().id_source(id).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt(id).show(ui, |ui| {
                     // let text_height = egui::TextStyle::Body.resolve(ui.style()).size;
 
                     let  table = egui_extras::TableBuilder::new(ui)
@@ -62,7 +64,7 @@ pub fn pair_table(ui: &mut Ui, id: impl std::hash::Hash, pair_vec: &mut Vec<Pair
                         })
                         .body(|mut body| {
                             pair_vec.retain_mut(|el| {
-                                let mut r = true;
+                                let mut is_retain = true;
 
                                 body.row(30.0, |mut row| {
                                     row.col(|ui| {
@@ -84,12 +86,12 @@ pub fn pair_table(ui: &mut Ui, id: impl std::hash::Hash, pair_vec: &mut Vec<Pair
                                     });
 
                                     row.col(|ui| {
-                                        if ui.button("Del").clicked() {
-                                            r = false;
+                                        if error_button(ui,"Del").clicked() {
+                                            is_retain = false;
                                         }
                                     });
                                 });
-                                r
+                                is_retain
                             });
                         })
                 });
@@ -114,6 +116,7 @@ pub fn code_view_ui(ui: &mut egui::Ui, mut code: &str) {
             .font(egui::TextStyle::Monospace) // for cursor height
             .code_editor()
             .desired_rows(1)
-            .lock_focus(true),
+            .lock_focus(true)
+            .desired_width(f32::INFINITY),
     );
 }
