@@ -3,9 +3,15 @@
 
 use anyhow::Result;
 use core::f32;
+use futures_util::{SinkExt, StreamExt};
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::ops::Index;
 use std::sync::Arc;
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::{http, Message};
+use tokio_tungstenite::{connect_async, tungstenite};
+// use tungstenite::{self, http, Message};
 
 use api_test_rs::*;
 use eframe::egui::style::Selection;
@@ -14,7 +20,7 @@ use eframe::egui::{CollapsingHeader, FontFamily, FontId, TextEdit, TextStyle, Th
 use eframe::epaint::{vec2, Color32};
 use image::{open, EncodableLayout};
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use widget::error_button;
 
 mod util;
@@ -23,7 +29,7 @@ mod widget;
 /* #region const variables */
 const SEND_THREAD_COUN: usize = 2;
 const SAVE_DIR: &str = "./_SAVED/";
-const METHODS: [Method; 9] = [
+const METHODS: [Method; 10] = [
     Method::GET,
     Method::POST,
     Method::PUT,
@@ -33,6 +39,7 @@ const METHODS: [Method; 9] = [
     Method::CONNECT,
     Method::TRACE,
     Method::PATCH,
+    Method::WS,
 ];
 const REQ_TABS: [RequestTab; 3] = [RequestTab::Params, RequestTab::Headers, RequestTab::Body];
 const REQ_BODY_TABS: [RequestBodyTab; 3] = [
@@ -47,6 +54,8 @@ const REQ_BODY_RAW_TYPES: [RequestBodyRawType; 5] = [
     RequestBodyRawType::XML,
     RequestBodyRawType::BinaryFile,
 ];
+const WS_BODY_RAW_TYPES: [RequestBodyRawType; 2] =
+    [RequestBodyRawType::Text, RequestBodyRawType::BinaryFile];
 const COLUMN_WIDTH_INITIAL: f32 = 200.0;
 const RESPONSE_TABS: [ResponseTab; 2] = [ResponseTab::Data, ResponseTab::Header];
 /* #endregion */
@@ -132,6 +141,8 @@ struct ApiTestApp {
     rt: Runtime,
     tx: mpsc::Sender<Result<HttpResponse>>,
     rx: mpsc::Receiver<Result<HttpResponse>>,
+    ws_tx: Option<tokio::sync::mpsc::Sender<WsMessage>>,
+    ws_msgs: Arc<std::sync::RwLock<Vec<Message>>>,
 
     // 加载保存的项目文件路径
     project_path: String,
@@ -164,6 +175,7 @@ impl Default for ApiTestApp {
         Self {
             tx,
             rx,
+            ws_tx: Default::default(),
             rt: tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .worker_threads(SEND_THREAD_COUN)
@@ -192,6 +204,7 @@ impl Default for ApiTestApp {
             remove_group: None,
 
             modal: Default::default(),
+            ws_msgs: Default::default(),
         }
     }
 }
@@ -209,6 +222,223 @@ impl ApiTestApp {
             my.load_project();
             my.select_test = None;
         }
+
+        let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel::<WsMessage>(32);
+        my.ws_tx = Some(ws_tx);
+        let ws_msgs = my.ws_msgs.clone();
+        my.rt.spawn(async move {
+            let mut socket_opt: Option<_> = None;
+
+            while let Some(msg) = ws_rx.recv().await {
+                match msg {
+                    WsMessage::Send(cfg, variables) => {
+                        if socket_opt.is_none() {
+                            let mut base_url =
+                                reqwest::Url::parse(&util::parse_var_str(&cfg.url, &variables))
+                                    .expect("parse url");
+                            // 添加查询参数
+                            let request_query = util::real_tuple_vec(&cfg.query, &variables);
+                            request_query.iter().for_each(|(k, v)| {
+                                base_url.query_pairs_mut().append_pair(k, v);
+                            });
+                            let socket_uri =
+                                base_url.as_str().parse::<http::Uri>().expect("parse url 2");
+
+                            let authority = socket_uri.authority().unwrap().as_str();
+
+                            let host = authority
+                                .find('@')
+                                .map(|idx| authority.split_at(idx + 1).1)
+                                .unwrap_or_else(|| authority);
+
+                            let mut req_builder = http::Request::builder()
+                                .method("GET")
+                                .header("Host", host)
+                                .header("Connection", "Upgrade")
+                                .header("Upgrade", "websocket")
+                                .header("Sec-WebSocket-Version", "13")
+                                .header("Sec-WebSocket-Key", generate_key())
+                                .uri(socket_uri);
+
+                            // 添加自定义header
+                            let request_header = util::real_tuple_vec(&cfg.header, &variables);
+                            for (k, v) in &request_header {
+                                req_builder = req_builder.header(k, v);
+                            }
+
+                            let req: http::Request<()> = req_builder.body(()).unwrap();
+
+                            match connect_async(req).await {
+                                Ok((socket, _)) => {
+                                    socket_opt = Some(socket);
+                                }
+                                Err(err) => {
+                                    ws_msgs
+                                        .write()
+                                        .unwrap()
+                                        .push(Message::text(format!("> Connect Error: {}", err)));
+                                    socket_opt = None;
+                                }
+                            }
+                        }
+
+                        if let Some(socket) = socket_opt.as_mut() {
+                            let send_msg = if cfg.body_raw_type == RequestBodyRawType::Text {
+                                let data = &cfg.body_raw;
+                                tungstenite::Message::Text(data.into())
+                            } else {
+                                let dat = util::read_binary(&cfg.body_raw).await.unwrap();
+                                tungstenite::Message::Binary(dat.into())
+                            };
+                            let (mut w, _) = socket.split();
+                            match w.send(send_msg).await {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    ws_msgs
+                                        .write()
+                                        .unwrap()
+                                        .push(Message::text(format!("> Send Error: {}", err)));
+                                }
+                            }
+                        };
+                    }
+                    WsMessage::Close => {
+                        // if let Some(socket) = socket_opt.as_mut() {
+                        //     socket.close(None);
+                        //     socket_opt = None;
+                        // }
+                    }
+                    WsMessage::ReadMessage => {
+                        // if let Some(socket) = socket_opt.as_mut() {
+                        //     let (_, mut r) = socket.split();
+                        //     // TODO: 这回阻塞程序
+                        //     if let Some(msg) = r.next().await {
+                        //         match msg {
+                        //             Ok(msg) => {
+                        //                 ws_msgs.write().unwrap().push(msg);
+                        //             }
+                        //             Err(err) => {
+                        //                 dbg!(err);
+                        //             }
+                        //         }
+                        //     }
+                        // }
+                    }
+                }
+            }
+        });
+
+        // std::thread::spawn(move || {
+        //     let mut socket_opt: Option<_> = None;
+        //     let rt = tokio::runtime::Runtime::new().unwrap();
+
+        //     rt.spawn(async move {
+        //         loop {
+        //             ws_auto_read_msg.send(WsMessage::ReadMessage);
+        //             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        //         }
+        //     });
+
+        //     while let Ok(msg) = ws_rx.recv() {
+        //         match msg {
+        //             WsMessage::Send(cfg, variables) => {
+        //                 if socket_opt.is_none() {
+        //                     let mut base_url =
+        //                         reqwest::Url::parse(&util::parse_var_str(&cfg.url, &variables))
+        //                             .expect("parse url");
+        //                     // 添加查询参数
+        //                     let request_query = util::real_tuple_vec(&cfg.query, &variables);
+        //                     request_query.iter().for_each(|(k, v)| {
+        //                         base_url.query_pairs_mut().append_pair(k, v);
+        //                     });
+        //                     let socket_uri =
+        //                         base_url.as_str().parse::<http::Uri>().expect("parse url 2");
+
+        //                     let authority = socket_uri.authority().unwrap().as_str();
+
+        //                     let host = authority
+        //                         .find('@')
+        //                         .map(|idx| authority.split_at(idx + 1).1)
+        //                         .unwrap_or_else(|| authority);
+
+        //                     let mut req_builder = tungstenite::http::Request::builder()
+        //                         .method("GET")
+        //                         .header("Host", host)
+        //                         .header("Connection", "Upgrade")
+        //                         .header("Upgrade", "websocket")
+        //                         .header("Sec-WebSocket-Version", "13")
+        //                         .header(
+        //                             "Sec-WebSocket-Key",
+        //                             tungstenite::handshake::client::generate_key(),
+        //                         )
+        //                         .uri(socket_uri);
+
+        //                     // 添加自定义header
+        //                     let request_header = util::real_tuple_vec(&cfg.header, &variables);
+        //                     for (k, v) in &request_header {
+        //                         req_builder = req_builder.header(k, v);
+        //                     }
+
+        //                     let req: http::Request<()> = req_builder.body(()).unwrap();
+
+        //                     match tungstenite::connect(req) {
+        //                         Ok((socket, _)) => {
+        //                             socket_opt = Some(socket);
+        //                         }
+        //                         Err(err) => {
+        //                             ws_msgs
+        //                                 .write()
+        //                                 .unwrap()
+        //                                 .push(Message::text(format!("> Connect Error: {}", err)));
+        //                             socket_opt = None;
+        //                         }
+        //                     }
+        //                 }
+
+        //                 if let Some(socket) = socket_opt.as_mut() {
+        //                     let send_msg = if cfg.body_raw_type == RequestBodyRawType::Text {
+        //                         let data = &cfg.body_raw;
+        //                         tungstenite::Message::Text(data.into())
+        //                     } else {
+        //                         let dat = rt.block_on(async {
+        //                             let dat = util::read_binary(&cfg.body_raw).await.unwrap();
+        //                             dat
+        //                         });
+        //                         tungstenite::Message::Binary(dat.into())
+        //                     };
+        //                     match socket.send(send_msg) {
+        //                         Ok(_) => {}
+        //                         Err(err) => {
+        //                             ws_msgs
+        //                                 .write()
+        //                                 .unwrap()
+        //                                 .push(Message::text(format!("> Send Error: {}", err)));
+        //                         }
+        //                     }
+        //                 };
+        //             }
+        //             WsMessage::Close => {
+        //                 if let Some(socket) = socket_opt.as_mut() {
+        //                     socket.close(None);
+        //                     socket_opt = None;
+        //                 }
+        //             }
+        //             WsMessage::ReadMessage => {
+        //                 if let Some(socket) = socket_opt.as_mut() {
+        //                     match socket.read() {
+        //                         Ok(msg) => {
+        //                             ws_msgs.write().unwrap().push(msg);
+        //                         }
+        //                         Err(err) => {
+        //                             dbg!(err);
+        //                         }
+        //                     }
+        //                 }
+        //             }
+        //         }
+        //     }
+        // });
+
         my
     }
 
@@ -536,6 +766,13 @@ impl ApiTestApp {
                         return;
                     };
 
+                    if let Some(ws_tx) = &self.ws_tx {
+                        let tx: mpsc::Sender<WsMessage> = ws_tx.clone();
+                        self.rt.spawn(async move {
+                            tx.send(WsMessage::ReadMessage).await;
+                        });
+                    };
+
                     // 渲染时尝试获取请求返回值，如果不渲染就不会去获取，其它方法使用Arc+Mutex
                     match self.rx.try_recv() {
                         Ok(data) => match data {
@@ -574,14 +811,16 @@ impl ApiTestApp {
                         ui.add(
                             egui::TextEdit::singleline(&mut http_test.request.url)
                                 .desired_width(300.)
-                                .hint_text("http url"),
+                                .hint_text("url"),
                         );
 
-                        ui.add(
-                            egui::TextEdit::singleline(&mut http_test.send_count_ui)
-                                .desired_width(60.)
-                                .hint_text("Count"),
-                        );
+                        if http_test.request.method != Method::WS {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut http_test.send_count_ui)
+                                    .desired_width(60.)
+                                    .hint_text("Count"),
+                            );
+                        }
 
                         if ui
                             .add_enabled(
@@ -590,39 +829,50 @@ impl ApiTestApp {
                             )
                             .clicked()
                         {
-                            http_test.send_before_init();
-
-                            if http_test.send_count <= 0 {
-                                return;
-                            }
-
-                            let cfg = Arc::new(http_test.request.to_owned());
-                            let variables = Arc::new(self.project.variables.to_owned());
-
-                            for _ in 0..http_test.send_count {
-                                let req_cfg = cfg.clone();
-                                let vars = variables.clone();
-                                let tx = self.tx.clone();
-                                self.rt.spawn(async move {
-                                    match tx.send(util::http_send(&*req_cfg, &*vars).await).await {
-                                        Ok(_) => {
-                                            // println!("send ok");
-                                        }
-                                        Err(_) => {
-                                            println!("send err");
-                                        }
-                                    };
-                                });
+                            if http_test.request.method == Method::WS {
+                                if let Some(ws_tx) = &self.ws_tx {
+                                    let cfg = http_test.request.to_owned();
+                                    let variables = self.project.variables.to_owned();
+                                    let tx = ws_tx.clone();
+                                    self.rt.spawn(async move {
+                                        tx.send(WsMessage::Send(cfg, variables)).await;
+                                    });
+                                }
+                            } else {
+                                http_test.send_before_init();
+                                if http_test.send_count <= 0 {
+                                    return;
+                                }
+                                let cfg = Arc::new(http_test.request.to_owned());
+                                let variables = Arc::new(self.project.variables.to_owned());
+                                for _ in 0..http_test.send_count {
+                                    let req_cfg = cfg.clone();
+                                    // TODO:现在每次发送变量都是固定的，可以使用lua脚本在发送前改变一些变量
+                                    let vars = variables.clone();
+                                    let tx = self.tx.clone();
+                                    self.rt.spawn(async move {
+                                        match tx
+                                            .send(util::http_send(&*req_cfg, &*vars).await)
+                                            .await
+                                        {
+                                            Ok(_) => {
+                                                // println!("send ok");
+                                            }
+                                            Err(_) => {
+                                                println!("send err");
+                                            }
+                                        };
+                                    });
+                                }
                             }
                         }
 
-                        ui.separator();
-
-                        // request result count
-                        let (s, e) = &http_test.s_e;
-                        ui.label(format!("s:{s}, e:{e}"));
-
-                        ui.separator();
+                        if http_test.request.method != Method::WS {
+                            ui.separator();
+                            // request result count
+                            let (s, e) = &http_test.s_e;
+                            ui.label(format!("s:{s}, e:{e}"));
+                        }
                     });
                     ui.separator();
 
@@ -650,7 +900,12 @@ impl ApiTestApp {
                                     ui.vertical(|ui| {
                                         ui.group(|ui| {
                                             ui.horizontal(|ui| {
-                                                REQ_BODY_RAW_TYPES.iter().for_each(|raw_type| {
+                                                if http_test.request.method == Method::WS {
+                                                    WS_BODY_RAW_TYPES.iter()
+                                                } else {
+                                                    REQ_BODY_RAW_TYPES.iter()
+                                                }
+                                                .for_each(|raw_type| {
                                                     ui.radio_value(
                                                         &mut http_test.request.body_raw_type,
                                                         raw_type.to_owned(),
@@ -675,6 +930,9 @@ impl ApiTestApp {
                                 }
 
                                 RequestBodyTab::Form => {
+                                    if http_test.request.method == Method::WS {
+                                        return;
+                                    }
                                     widget::pair_table(
                                         ui,
                                         "body_form scroll",
@@ -683,6 +941,9 @@ impl ApiTestApp {
                                 }
 
                                 RequestBodyTab::FormData => {
+                                    if http_test.request.method == Method::WS {
+                                        return;
+                                    }
                                     widget::pair_table(
                                         ui,
                                         "body_form scroll",
@@ -694,6 +955,27 @@ impl ApiTestApp {
                     };
 
                     ui.separator();
+
+                    if let Ok(ws_msgs) = self.ws_msgs.read() {
+                        let msgs = &*ws_msgs;
+                        for msg in msgs {
+                            match msg {
+                                Message::Text(utf8_bytes) => {
+                                    ui.label(utf8_bytes.as_str());
+                                }
+                                Message::Binary(bytes) => {
+                                    ui.label("[Binary]");
+                                }
+                                Message::Ping(bytes) => {}
+                                Message::Pong(bytes) => {}
+                                Message::Close(close_frame) => {
+                                    ui.label("[close]");
+                                }
+                                Message::Frame(frame) => {}
+                            }
+                            ui.separator();
+                        }
+                    }
 
                     // 请求结果
                     let Some(response) = &mut http_test.response else {

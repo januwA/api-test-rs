@@ -10,6 +10,13 @@ const APPLICATION_JSON: &str = "application/json";
 const APPLICATION_FORM: &str = "application/x-www-form-urlencoded";
 const APPLICATION_STREAM: &str = "application/octet-stream";
 
+#[derive(Debug)]
+pub enum WsMessage {
+    Send(HttpRequestConfig, Vec<PairUi>),
+    Close,
+    ReadMessage,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HttpRequestConfig {
     pub method: Method,
@@ -364,6 +371,7 @@ pub enum Method {
     TRACE,
     CONNECT,
     PATCH,
+    WS,
 }
 
 impl Method {

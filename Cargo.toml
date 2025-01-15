@@ -36,6 +36,9 @@ strum = { version = "0.24", features = ["derive"] }
 
 regex = "1.5"
 lazy_static = "1.4"
+# tungstenite = "0.26.1"
+tokio-tungstenite = "*"
+futures-util = "0.3.31"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
