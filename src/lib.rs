@@ -10,8 +10,9 @@ const APPLICATION_JSON: &str = "application/json";
 const APPLICATION_FORM: &str = "application/x-www-form-urlencoded";
 const APPLICATION_STREAM: &str = "application/octet-stream";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum WsMessage {
+    Init(HttpRequestConfig, Vec<PairUi>),
     Send(HttpRequestConfig, Vec<PairUi>),
     Close,
     ReadMessage,

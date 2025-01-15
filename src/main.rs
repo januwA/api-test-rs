@@ -226,219 +226,120 @@ impl ApiTestApp {
         let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel::<WsMessage>(32);
         my.ws_tx = Some(ws_tx);
         let ws_msgs = my.ws_msgs.clone();
+
         my.rt.spawn(async move {
-            let mut socket_opt: Option<_> = None;
+            let ws_msgs_c = ws_msgs.clone();
+            let mut _tx: Option<tokio::sync::mpsc::Sender<WsMessage>> = None;
+            let mut need_init = true;
 
             while let Some(msg) = ws_rx.recv().await {
-                match msg {
-                    WsMessage::Send(cfg, variables) => {
-                        if socket_opt.is_none() {
-                            let mut base_url =
-                                reqwest::Url::parse(&util::parse_var_str(&cfg.url, &variables))
-                                    .expect("parse url");
-                            // 添加查询参数
-                            let request_query = util::real_tuple_vec(&cfg.query, &variables);
-                            request_query.iter().for_each(|(k, v)| {
-                                base_url.query_pairs_mut().append_pair(k, v);
-                            });
-                            let socket_uri =
-                                base_url.as_str().parse::<http::Uri>().expect("parse url 2");
+                if !need_init {
+                    if let Some(tx) = _tx.as_mut() {
+                        tx.send(msg).await;
+                    };
+                    continue;
+                }
+                if let WsMessage::Send(cfg, variables) = msg {
+                    if need_init {
+                        let mut base_url: reqwest::Url =
+                            reqwest::Url::parse(&util::parse_var_str(&cfg.url, &variables))
+                                .expect("parse url");
+                        // 添加查询参数
+                        let request_query = util::real_tuple_vec(&cfg.query, &variables);
+                        request_query.iter().for_each(|(k, v)| {
+                            base_url.query_pairs_mut().append_pair(k, v);
+                        });
+                        let socket_uri =
+                            base_url.as_str().parse::<http::Uri>().expect("parse url 2");
 
-                            let authority = socket_uri.authority().unwrap().as_str();
+                        let authority = socket_uri.authority().unwrap().as_str();
 
-                            let host = authority
-                                .find('@')
-                                .map(|idx| authority.split_at(idx + 1).1)
-                                .unwrap_or_else(|| authority);
+                        let host = authority
+                            .find('@')
+                            .map(|idx| authority.split_at(idx + 1).1)
+                            .unwrap_or_else(|| authority);
 
-                            let mut req_builder = http::Request::builder()
-                                .method("GET")
-                                .header("Host", host)
-                                .header("Connection", "Upgrade")
-                                .header("Upgrade", "websocket")
-                                .header("Sec-WebSocket-Version", "13")
-                                .header("Sec-WebSocket-Key", generate_key())
-                                .uri(socket_uri);
+                        let mut req_builder = http::Request::builder()
+                            .method("GET")
+                            .header("Host", host)
+                            .header("Connection", "Upgrade")
+                            .header("Upgrade", "websocket")
+                            .header("Sec-WebSocket-Version", "13")
+                            .header("Sec-WebSocket-Key", generate_key())
+                            .uri(socket_uri);
 
-                            // 添加自定义header
-                            let request_header = util::real_tuple_vec(&cfg.header, &variables);
-                            for (k, v) in &request_header {
-                                req_builder = req_builder.header(k, v);
-                            }
-
-                            let req: http::Request<()> = req_builder.body(()).unwrap();
-
-                            match connect_async(req).await {
-                                Ok((socket, _)) => {
-                                    socket_opt = Some(socket);
-                                }
-                                Err(err) => {
-                                    ws_msgs
-                                        .write()
-                                        .unwrap()
-                                        .push(Message::text(format!("> Connect Error: {}", err)));
-                                    socket_opt = None;
-                                }
-                            }
+                        // 添加自定义header
+                        let request_header = util::real_tuple_vec(&cfg.header, &variables);
+                        for (k, v) in &request_header {
+                            req_builder = req_builder.header(k, v);
                         }
 
-                        if let Some(socket) = socket_opt.as_mut() {
-                            let send_msg = if cfg.body_raw_type == RequestBodyRawType::Text {
-                                let data = &cfg.body_raw;
-                                tungstenite::Message::Text(data.into())
-                            } else {
-                                let dat = util::read_binary(&cfg.body_raw).await.unwrap();
-                                tungstenite::Message::Binary(dat.into())
-                            };
-                            let (mut w, _) = socket.split();
-                            match w.send(send_msg).await {
-                                Ok(_) => {}
-                                Err(err) => {
-                                    ws_msgs
-                                        .write()
-                                        .unwrap()
-                                        .push(Message::text(format!("> Send Error: {}", err)));
-                                }
+                        let req: http::Request<()> = req_builder.body(()).unwrap();
+
+                        match connect_async(req).await {
+                            Ok((socket, _)) => {
+                                need_init = false;
+
+                                let (mut w, mut r) = socket.split();
+
+                                let ws_msgs_r = ws_msgs_c.clone();
+                                tokio::spawn(async move {
+                                    while let Some(message) = r.next().await {
+                                        match message {
+                                            Ok(msg) => {
+                                                ws_msgs_r.write().unwrap().push(msg);
+                                            }
+                                            Err(err) => {
+                                                dbg!(err);
+                                            }
+                                        }
+                                    }
+                                });
+
+                                let ws_msgs_w = ws_msgs_c.clone();
+                                let (tx, mut rx) = tokio::sync::mpsc::channel::<WsMessage>(32);
+                                _tx = Some(tx);
+
+                                tokio::spawn(async move {
+                                    while let Some(msg) = rx.recv().await {
+                                        if let WsMessage::Send(cfg, variables) = msg {
+                                            let send_msg = if cfg.body_raw_type
+                                                == RequestBodyRawType::Text
+                                            {
+                                                let data = &cfg.body_raw;
+                                                tungstenite::Message::Text(data.into())
+                                            } else {
+                                                let dat =
+                                                    util::read_binary(&cfg.body_raw).await.unwrap();
+                                                tungstenite::Message::Binary(dat.into())
+                                            };
+                                            match w.send(send_msg).await {
+                                                Ok(_) => {}
+                                                Err(err) => {
+                                                    ws_msgs_w.write().unwrap().push(Message::text(
+                                                        format!("> Send Error: {}", err),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
                             }
-                        };
+                            Err(err) => {
+                                ws_msgs
+                                    .write()
+                                    .unwrap()
+                                    .push(Message::text(format!("> Connect Error: {}", err)));
+                            }
+                        }
                     }
-                    WsMessage::Close => {
-                        // if let Some(socket) = socket_opt.as_mut() {
-                        //     socket.close(None);
-                        //     socket_opt = None;
-                        // }
-                    }
-                    WsMessage::ReadMessage => {
-                        // if let Some(socket) = socket_opt.as_mut() {
-                        //     let (_, mut r) = socket.split();
-                        //     // TODO: 这回阻塞程序
-                        //     if let Some(msg) = r.next().await {
-                        //         match msg {
-                        //             Ok(msg) => {
-                        //                 ws_msgs.write().unwrap().push(msg);
-                        //             }
-                        //             Err(err) => {
-                        //                 dbg!(err);
-                        //             }
-                        //         }
-                        //     }
-                        // }
-                    }
+                } else {
+                    if let Some(tx) = _tx.as_mut() {
+                        tx.send(msg).await;
+                    };
                 }
             }
         });
-
-        // std::thread::spawn(move || {
-        //     let mut socket_opt: Option<_> = None;
-        //     let rt = tokio::runtime::Runtime::new().unwrap();
-
-        //     rt.spawn(async move {
-        //         loop {
-        //             ws_auto_read_msg.send(WsMessage::ReadMessage);
-        //             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        //         }
-        //     });
-
-        //     while let Ok(msg) = ws_rx.recv() {
-        //         match msg {
-        //             WsMessage::Send(cfg, variables) => {
-        //                 if socket_opt.is_none() {
-        //                     let mut base_url =
-        //                         reqwest::Url::parse(&util::parse_var_str(&cfg.url, &variables))
-        //                             .expect("parse url");
-        //                     // 添加查询参数
-        //                     let request_query = util::real_tuple_vec(&cfg.query, &variables);
-        //                     request_query.iter().for_each(|(k, v)| {
-        //                         base_url.query_pairs_mut().append_pair(k, v);
-        //                     });
-        //                     let socket_uri =
-        //                         base_url.as_str().parse::<http::Uri>().expect("parse url 2");
-
-        //                     let authority = socket_uri.authority().unwrap().as_str();
-
-        //                     let host = authority
-        //                         .find('@')
-        //                         .map(|idx| authority.split_at(idx + 1).1)
-        //                         .unwrap_or_else(|| authority);
-
-        //                     let mut req_builder = tungstenite::http::Request::builder()
-        //                         .method("GET")
-        //                         .header("Host", host)
-        //                         .header("Connection", "Upgrade")
-        //                         .header("Upgrade", "websocket")
-        //                         .header("Sec-WebSocket-Version", "13")
-        //                         .header(
-        //                             "Sec-WebSocket-Key",
-        //                             tungstenite::handshake::client::generate_key(),
-        //                         )
-        //                         .uri(socket_uri);
-
-        //                     // 添加自定义header
-        //                     let request_header = util::real_tuple_vec(&cfg.header, &variables);
-        //                     for (k, v) in &request_header {
-        //                         req_builder = req_builder.header(k, v);
-        //                     }
-
-        //                     let req: http::Request<()> = req_builder.body(()).unwrap();
-
-        //                     match tungstenite::connect(req) {
-        //                         Ok((socket, _)) => {
-        //                             socket_opt = Some(socket);
-        //                         }
-        //                         Err(err) => {
-        //                             ws_msgs
-        //                                 .write()
-        //                                 .unwrap()
-        //                                 .push(Message::text(format!("> Connect Error: {}", err)));
-        //                             socket_opt = None;
-        //                         }
-        //                     }
-        //                 }
-
-        //                 if let Some(socket) = socket_opt.as_mut() {
-        //                     let send_msg = if cfg.body_raw_type == RequestBodyRawType::Text {
-        //                         let data = &cfg.body_raw;
-        //                         tungstenite::Message::Text(data.into())
-        //                     } else {
-        //                         let dat = rt.block_on(async {
-        //                             let dat = util::read_binary(&cfg.body_raw).await.unwrap();
-        //                             dat
-        //                         });
-        //                         tungstenite::Message::Binary(dat.into())
-        //                     };
-        //                     match socket.send(send_msg) {
-        //                         Ok(_) => {}
-        //                         Err(err) => {
-        //                             ws_msgs
-        //                                 .write()
-        //                                 .unwrap()
-        //                                 .push(Message::text(format!("> Send Error: {}", err)));
-        //                         }
-        //                     }
-        //                 };
-        //             }
-        //             WsMessage::Close => {
-        //                 if let Some(socket) = socket_opt.as_mut() {
-        //                     socket.close(None);
-        //                     socket_opt = None;
-        //                 }
-        //             }
-        //             WsMessage::ReadMessage => {
-        //                 if let Some(socket) = socket_opt.as_mut() {
-        //                     match socket.read() {
-        //                         Ok(msg) => {
-        //                             ws_msgs.write().unwrap().push(msg);
-        //                         }
-        //                         Err(err) => {
-        //                             dbg!(err);
-        //                         }
-        //                     }
-        //                 }
-        //             }
-        //         }
-        //     }
-        // });
-
         my
     }
 
