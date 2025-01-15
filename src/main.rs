@@ -858,24 +858,37 @@ impl ApiTestApp {
                     ui.separator();
 
                     if let Ok(ws_msgs) = self.ws_msgs.read() {
-                        let msgs = &*ws_msgs;
-                        for msg in msgs {
-                            match msg {
-                                Message::Text(utf8_bytes) => {
-                                    ui.label(utf8_bytes.as_str());
-                                }
-                                Message::Binary(bytes) => {
-                                    ui.label("[Binary]");
-                                }
-                                Message::Ping(bytes) => {}
-                                Message::Pong(bytes) => {}
-                                Message::Close(close_frame) => {
-                                    ui.label("[close]");
-                                }
-                                Message::Frame(frame) => {}
+                        ui.horizontal(|ui| {
+                            if ui.button("Clear").clicked() {
+                                self.ws_msgs.write().unwrap().clear();
                             }
-                            ui.separator();
-                        }
+                        });
+                        ui.separator();
+
+                        egui::ScrollArea::both()
+                            .hscroll(true)
+                            .vscroll(true)
+                            .id_salt("ws messages")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ws_msgs.iter().for_each(|msg| {
+                                    match msg {
+                                        Message::Text(utf8_bytes) => {
+                                            ui.label(utf8_bytes.as_str());
+                                        }
+                                        Message::Binary(bytes) => {
+                                            ui.label("[Binary]");
+                                        }
+                                        Message::Ping(bytes) => {}
+                                        Message::Pong(bytes) => {}
+                                        Message::Close(close_frame) => {
+                                            ui.label("[close]");
+                                        }
+                                        Message::Frame(frame) => {}
+                                    }
+                                    ui.separator();
+                                });
+                            });
                     }
 
                     // 请求结果
