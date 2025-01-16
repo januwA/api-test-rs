@@ -19,8 +19,8 @@ rpath = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-eframe = { version = "0.30.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence"]}
-egui_extras = { version = "0.30", features = ["image"] }
+eframe = { version = "0.32.1", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence"]}
+egui_extras = { version = "0.32.1", features = ["image"] }
 image = { version = "0.25" }
 env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
