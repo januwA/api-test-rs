@@ -20,7 +20,7 @@ use eframe::egui::{CollapsingHeader, FontFamily, FontId, TextEdit, TextStyle, Th
 use eframe::epaint::{vec2, Color32};
 use image::{open, EncodableLayout};
 use tokio::runtime::Runtime;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex};
 use widget::error_button;
 
 mod util;
@@ -230,17 +230,18 @@ impl ApiTestApp {
         my.rt.spawn(async move {
             let ws_msgs_c = ws_msgs.clone();
             let mut _tx: Option<tokio::sync::mpsc::Sender<WsMessage>> = None;
-            let mut need_init = true;
+            let mut need_init = Arc::new(Mutex::new(true));
+            let mut need_init_c = need_init.clone();
 
             while let Some(msg) = ws_rx.recv().await {
-                if !need_init {
+                if !*need_init.lock().await {
                     if let Some(tx) = _tx.as_mut() {
                         tx.send(msg).await;
                     };
                     continue;
                 }
                 if let WsMessage::Send(cfg, variables) = msg {
-                    if need_init {
+                    if *need_init.lock().await {
                         let mut base_url: reqwest::Url =
                             reqwest::Url::parse(&util::parse_var_str(&cfg.url, &variables))
                                 .expect("parse url");
@@ -278,11 +279,17 @@ impl ApiTestApp {
 
                         match connect_async(req).await {
                             Ok((socket, _)) => {
-                                need_init = false;
+                                let mut ni = need_init.lock().await;
+                                *ni = false;
+
+                                let (tx_w, mut rx_w) = tokio::sync::mpsc::channel::<WsMessage>(32);
+                                let tx_w2 = tx_w.clone();
+                                _tx = Some(tx_w);
 
                                 let (mut w, mut r) = socket.split();
 
                                 let ws_msgs_r = ws_msgs_c.clone();
+                                let need_init_r = need_init_c.clone();
                                 tokio::spawn(async move {
                                     while let Some(message) = r.next().await {
                                         match message {
@@ -290,39 +297,65 @@ impl ApiTestApp {
                                                 ws_msgs_r.write().unwrap().push(msg);
                                             }
                                             Err(err) => {
-                                                dbg!(err);
+                                                ws_msgs_r.write().unwrap().push(Message::text(
+                                                    format!("> Read Error: {}", err).to_owned(),
+                                                ));
+                                                ws_msgs_r
+                                                    .write()
+                                                    .unwrap()
+                                                    .push(Message::text("> Send Error: ws 已断开"));
+                                                break;
                                             }
                                         }
                                     }
+                                    println!("读取断开");
+                                    let mut ni = need_init_r.lock().await;
+                                    *ni = true;
+                                    tx_w2.send(WsMessage::Close).await;
                                 });
 
                                 let ws_msgs_w = ws_msgs_c.clone();
-                                let (tx, mut rx) = tokio::sync::mpsc::channel::<WsMessage>(32);
-                                _tx = Some(tx);
+                                let need_init_w = need_init.clone();
 
                                 tokio::spawn(async move {
-                                    while let Some(msg) = rx.recv().await {
-                                        if let WsMessage::Send(cfg, variables) = msg {
-                                            let send_msg = if cfg.body_raw_type
-                                                == RequestBodyRawType::Text
-                                            {
-                                                let data = &cfg.body_raw;
-                                                tungstenite::Message::Text(data.into())
-                                            } else {
-                                                let dat =
-                                                    util::read_binary(&cfg.body_raw).await.unwrap();
-                                                tungstenite::Message::Binary(dat.into())
-                                            };
-                                            match w.send(send_msg).await {
-                                                Ok(_) => {}
-                                                Err(err) => {
-                                                    ws_msgs_w.write().unwrap().push(Message::text(
-                                                        format!("> Send Error: {}", err),
-                                                    ));
+                                    while let Some(msg) = rx_w.recv().await {
+                                        match msg {
+                                            WsMessage::Init(http_request_config, vec) => {}
+                                            WsMessage::Send(http_request_config, vec) => {
+                                                let send_msg = if cfg.body_raw_type
+                                                    == RequestBodyRawType::Text
+                                                {
+                                                    let data = &cfg.body_raw;
+                                                    tungstenite::Message::Text(data.into())
+                                                } else {
+                                                    let dat = util::read_binary(&cfg.body_raw)
+                                                        .await
+                                                        .unwrap();
+                                                    tungstenite::Message::Binary(dat.into())
+                                                };
+                                                match w.send(send_msg).await {
+                                                    Ok(_) => {}
+                                                    Err(err) => {
+                                                        dbg!(&err);
+                                                        ws_msgs_w.write().unwrap().push(
+                                                            Message::text(format!(
+                                                                "> Send Error: {}",
+                                                                err
+                                                            )),
+                                                        );
+                                                        break;
+                                                    }
                                                 }
                                             }
+                                            WsMessage::Close => {
+                                                break;
+                                            }
+                                            WsMessage::ReadMessage => {}
                                         }
                                     }
+                                    println!("写入断开");
+                                    let mut ni = need_init_w.lock().await;
+                                    *ni = true;
                                 });
                             }
                             Err(err) => {
@@ -857,38 +890,49 @@ impl ApiTestApp {
 
                     ui.separator();
 
-                    if let Ok(ws_msgs) = self.ws_msgs.read() {
+                    if http_test.request.method == Method::WS {
                         ui.horizontal(|ui| {
                             if ui.button("Clear").clicked() {
                                 self.ws_msgs.write().unwrap().clear();
                             }
+                            if ui.button("WS Clone").clicked() {
+                                if let Some(ws_tx) = &self.ws_tx {
+                                    let tx: mpsc::Sender<WsMessage> = ws_tx.clone();
+                                    self.rt.spawn(async move {
+                                        tx.send(WsMessage::Close).await;
+                                    });
+                                }
+                            }
                         });
-                        ui.separator();
 
-                        egui::ScrollArea::both()
-                            .hscroll(true)
-                            .vscroll(true)
-                            .id_salt("ws messages")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ws_msgs.iter().for_each(|msg| {
-                                    match msg {
-                                        Message::Text(utf8_bytes) => {
-                                            ui.label(utf8_bytes.as_str());
+                        if let Ok(ws_msgs) = self.ws_msgs.read() {
+                            ui.separator();
+
+                            egui::ScrollArea::both()
+                                .hscroll(true)
+                                .vscroll(true)
+                                .id_salt("ws messages")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ws_msgs.iter().for_each(|msg| {
+                                        match msg {
+                                            Message::Text(utf8_bytes) => {
+                                                ui.label(utf8_bytes.as_str());
+                                            }
+                                            Message::Binary(bytes) => {
+                                                ui.label("[Binary]");
+                                            }
+                                            Message::Ping(bytes) => {}
+                                            Message::Pong(bytes) => {}
+                                            Message::Close(close_frame) => {
+                                                ui.label("[close]");
+                                            }
+                                            Message::Frame(frame) => {}
                                         }
-                                        Message::Binary(bytes) => {
-                                            ui.label("[Binary]");
-                                        }
-                                        Message::Ping(bytes) => {}
-                                        Message::Pong(bytes) => {}
-                                        Message::Close(close_frame) => {
-                                            ui.label("[close]");
-                                        }
-                                        Message::Frame(frame) => {}
-                                    }
-                                    ui.separator();
+                                        ui.separator();
+                                    });
                                 });
-                            });
+                        }
                     }
 
                     // 请求结果
