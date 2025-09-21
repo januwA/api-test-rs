@@ -991,6 +991,7 @@ impl ApiTestApp {
                                 .clicked()
                             {
                                 match util::download(
+                                    &http_test.request.url,
                                     &http_test.download_path,
                                     match http_test.response_tab_ui {
                                         ResponseTab::Data => data_vec,

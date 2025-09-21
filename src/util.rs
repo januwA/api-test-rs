@@ -99,25 +99,30 @@ pub fn load_project(project_path: &str) -> Result<Project> {
 /**
  * 将一块数据下载到本地
  */
-pub fn download(download_path: &str, data: &[u8]) -> Result<()> {
+pub fn download(request_url: &str, download_path: &str, data: &[u8]) -> Result<()> {
     if download_path.is_empty() {
-        bail!("加载路径不能为空")
+        bail!("下载路径不能为空");
     }
 
-    let p = Path::new(&download_path);
-    let p_dir = p.parent();
-
-    let Some(p_dir) = p_dir else {
-        bail!("下载目录错误")
+    let path_obj = Path::new(download_path);
+    let final_path = if path_obj.file_name().is_some() {
+        // If download_path itself contains a filename, use it directly.
+        path_obj.to_path_buf()
+    } else {
+        // If download_path is a directory, try to get a filename from request_url.
+        let filename = Path::new(request_url)
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("无法从请求URL确定文件名"))?; // Use anyhow for consistent error type
+        path_obj.join(filename)
     };
 
-    if !p_dir.is_dir() || !p_dir.exists() {
-        bail!("下载目录不存在")
+    // Ensure the parent directory exists
+    if let Some(parent) = final_path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
 
-    if let Err(err) = std::fs::write(p, data) {
-        bail!(err)
-    }
+    std::fs::write(&final_path, data)
+        .map_err(|e| anyhow::anyhow!("写入文件失败: {} -> {}", final_path.display(), e))?;
 
     Ok(())
 }
