@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::ops::Index;
 use std::sync::Arc;
+use std::thread; // Add this line
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::{http, Message};
 use tokio_tungstenite::{connect_async, tungstenite};
@@ -27,7 +28,6 @@ mod util;
 mod widget;
 
 /* #region const variables */
-const SEND_THREAD_COUN: usize = 2;
 const SAVE_DIR: &str = "./_SAVED/";
 const METHODS: [Method; 10] = [
     Method::GET,
@@ -158,7 +158,6 @@ struct ApiTestApp {
     project: Project,
 
     action_status: String,
-    thread_count: String,
 
     // 已保存的项目 (name, path)
     saved: Vec<(String, String)>,
@@ -167,25 +166,33 @@ struct ApiTestApp {
     is_pretty: bool,
 
     pub modal: ModalOptions,
+    worker_thread_count: usize,
 }
 
 impl Default for ApiTestApp {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel::<Result<HttpResponse>>(32);
+
+        let num_worker_threads = thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or_else(|_| {
+                eprintln!("无法获取系统并行度，使用默认值 1");
+                1
+            });
+
         Self {
             tx,
             rx,
             ws_tx: Default::default(),
             rt: tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(SEND_THREAD_COUN)
+                .worker_threads(num_worker_threads) // Explicitly set the worker threads
                 .build()
                 .unwrap(),
             new_group_name: Default::default(),
             new_project_name: Default::default(),
             action_status: Default::default(),
             saved: Default::default(),
-            thread_count: SEND_THREAD_COUN.to_string(),
             project_path: Default::default(),
             select_test: Some((0, 0)),
             remove_test: None,
@@ -198,13 +205,14 @@ impl Default for ApiTestApp {
                     g.childrent.push(t);
                     g
                 }],
-                variables: vec![PairUi::from_kv("base", "http://127.0.0.1:3000")],
+                variables: vec![PairUi::from_kv("base", "http://127.00.1:3000")],
             },
             is_pretty: true,
             remove_group: None,
 
             modal: Default::default(),
             ws_msgs: Default::default(),
+            worker_thread_count: num_worker_threads,
         }
     }
 }
@@ -481,41 +489,12 @@ impl ApiTestApp {
 
                 ui.menu_button("Setting", |ui| {
                     ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label("Thread Count");
-                            // ui.text_edit_singleline(&mut self.thread_count);
-                            TextEdit::singleline(&mut self.thread_count)
-                                .desired_width(50.0)
-                                .show(ui);
-                            if ui.button("Set").clicked() {
-                                match self.thread_count.parse::<usize>() {
-                                    Ok(count) => {
-                                        match tokio::runtime::Builder::new_multi_thread()
-                                            .enable_all()
-                                            .worker_threads(count)
-                                            .build()
-                                        {
-                                            Ok(rt) => {
-                                                self.rt = rt;
-                                                self.action_status =
-                                                    "thread count set success".to_owned();
-                                                ui.close_menu();
-                                            }
-                                            Err(err) => {
-                                                self.action_status = err.to_string();
-                                            }
-                                        }
-                                    }
-                                    Err(err) => {
-                                        self.action_status = err.to_string();
-                                    }
-                                }
-                            }
-                        });
                         ui.separator();
                         global_theme_preference_buttons(ui);
                     });
                 });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui|
+                    {ui.label(format!("Worker Threads: {}", self.worker_thread_count));});
             });
         });
     }
