@@ -255,6 +255,7 @@ pub struct HttpResponse {
     pub img: Option<()>,
     pub text: Option<String>,
     pub data_vec: Option<Vec<u8>>,
+    pub duration: u128,
 }
 
 impl HttpResponse {

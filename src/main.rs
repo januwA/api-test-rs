@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use core::f32;
+use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -142,7 +143,7 @@ struct ApiTestApp {
     tx: mpsc::Sender<Result<HttpResponse>>,
     rx: mpsc::Receiver<Result<HttpResponse>>,
     ws_tx: Option<tokio::sync::mpsc::Sender<WsMessage>>,
-    ws_msgs: Arc<std::sync::RwLock<Vec<Message>>>,
+    ws_messages: Arc<std::sync::RwLock<Vec<Message>>>,
 
     // 加载保存的项目文件路径
     project_path: String,
@@ -179,7 +180,8 @@ impl Default for ApiTestApp {
                 eprintln!("无法获取系统并行度，使用默认值 1");
                 1
             });
-
+        
+        // 在这里clone一份rx
         Self {
             tx,
             rx,
@@ -211,7 +213,7 @@ impl Default for ApiTestApp {
             remove_group: None,
 
             modal: Default::default(),
-            ws_msgs: Default::default(),
+            ws_messages: Default::default(),
             worker_thread_count: num_worker_threads,
         }
     }
@@ -233,7 +235,7 @@ impl ApiTestApp {
 
         let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel::<WsMessage>(32);
         my.ws_tx = Some(ws_tx);
-        let ws_msgs = my.ws_msgs.clone();
+        let ws_msgs = my.ws_messages.clone();
 
         my.rt.spawn(async move {
             let ws_msgs_c = ws_msgs.clone();
@@ -688,20 +690,22 @@ impl ApiTestApp {
 
                     // 渲染时尝试获取请求返回值，如果不渲染就不会去获取，其它方法使用Arc+Mutex
                     match self.rx.try_recv() {
-                        Ok(data) => match data {
-                            Ok(res) => {
-                                http_test.s_e.0 += 1;
-                                // TODO: 使用lua脚本让使用者自行判断该请求是成功还是失败
-                                if http_test.response.is_none() {
-                                    http_test.response = Some(res);
-                                } else {
-                                    // httpConfig.response_vec.push(res);
+                        Ok(data) => {
+                            match data {
+                                Ok(res) => {
+                                    http_test.s_e.0 += 1;
+                                    // TODO: 使用lua脚本让使用者自行判断该请求是成功还是失败
+                                    if http_test.response.is_none() {
+                                        http_test.response = Some(res);
+                                    } else {
+                                        // httpConfig.response_vec.push(res);
+                                    }
+                                }
+                                Err(_) => {
+                                    http_test.s_e.1 += 1;
                                 }
                             }
-                            Err(_) => {
-                                http_test.s_e.1 += 1;
-                            }
-                        },
+                        }
                         Err(_) => {
                             // 没有消息，或其他错误
                         }
@@ -769,7 +773,7 @@ impl ApiTestApp {
                                             .await
                                         {
                                             Ok(_) => {
-                                                // println!("send ok");
+                                                println!("send ok");
                                             }
                                             Err(_) => {
                                                 println!("send err");
@@ -872,7 +876,7 @@ impl ApiTestApp {
                     if http_test.request.method == Method::WS {
                         ui.horizontal(|ui| {
                             if ui.button("Clear").clicked() {
-                                self.ws_msgs.write().unwrap().clear();
+                                self.ws_messages.write().unwrap().clear();
                             }
                             if ui.button("WS Clone").clicked() {
                                 if let Some(ws_tx) = &self.ws_tx {
@@ -884,7 +888,7 @@ impl ApiTestApp {
                             }
                         });
 
-                        if let Ok(ws_msgs) = self.ws_msgs.read() {
+                        if let Ok(ws_msgs) = self.ws_messages.read() {
                             ui.separator();
 
                             egui::ScrollArea::both()
@@ -948,8 +952,8 @@ impl ApiTestApp {
                     // 请求返回状态
                     ui.horizontal(|ui| {
                         ui.heading(format!(
-                            "Response Status: {:?} {}",
-                            response.version, response.status
+                            "Response Status: {:?} {}  {}ms",
+                            response.version, response.status, response.duration
                         ));
 
                         ui.separator();

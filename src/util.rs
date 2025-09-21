@@ -210,12 +210,15 @@ pub fn save_project(dir: &str, project: &Project) -> Result<()> {
 
 pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Result<HttpResponse> {
     let request_builder = req_cfg.request_build(vars).await?;
+    println!("请求已返回");
+    let start_time = std::time::Instant::now();
     let response = request_builder.send().await?;
+    let duration = start_time.elapsed().as_millis();
     let status = response.status();
     let version = response.version();
     let headers = response.headers().to_owned();
     let data_vec = response.bytes().await.and_then(|bs| Ok(bs.to_vec())).ok();
-
+    
     let mut headers_str = String::new();
     headers.iter().for_each(|(name, val)| {
         let name = name.as_str();
@@ -231,6 +234,7 @@ pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Resul
         img: None,
         text: None,
         headers_str,
+        duration,
     })
 }
 
