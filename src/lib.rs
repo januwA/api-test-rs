@@ -29,6 +29,7 @@ pub struct RequestStats {
     pub total_end_time: Option<std::time::Instant>,
     pub total_upload_bytes: u64,
     pub total_download_bytes: u64,
+    pub max_response_times: usize,
 }
 
 impl RequestStats {
@@ -70,6 +71,15 @@ impl RequestStats {
         sorted.sort();
         let index = ((p / 100.0) * sorted.len() as f64).ceil() as usize - 1;
         sorted.get(index.min(sorted.len() - 1)).copied()
+    }
+
+    pub fn add_response_time(&mut self, time: u128) {
+        if self.response_times.len() < self.max_response_times {
+            self.response_times.push(time);
+        } else if self.max_response_times > 0 {
+            let idx = rand::random::<usize>() % self.max_response_times;
+            self.response_times[idx] = time;
+        }
     }
 
     pub fn qps(&self) -> Option<f64> {
@@ -230,7 +240,11 @@ impl HttpRequestConfig {
         let body_raw = self.body_raw.to_owned();
         // let body_raw = util::parse_var_str(&self.body_raw, vars);
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(10000)
+            .pool_idle_timeout(std::time::Duration::from_secs(60))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .build()?;
 
         let mut request_builder = client.request(method, &real_url);
 
@@ -347,16 +361,18 @@ impl HttpTest {
         self.response_vec.clear();
         // init result vec size
         self.response_vec = Vec::with_capacity(self.send_count);
+        let max_samples = 100000.min(self.send_count);
         self.stats = RequestStats {
             pending: self.send_count,
             sending: 0,
             success: 0,
             failed: 0,
-            response_times: Vec::with_capacity(self.send_count),
+            response_times: Vec::with_capacity(max_samples),
             total_start_time: Some(std::time::Instant::now()),
             total_end_time: None,
             total_upload_bytes: 0,
             total_download_bytes: 0,
+            max_response_times: max_samples,
         };
     }
     pub fn from_name(name: String) -> Self {

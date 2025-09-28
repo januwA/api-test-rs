@@ -6,6 +6,7 @@ use core::f32;
 use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::BTreeMap;
+use futures::stream::{FuturesUnordered, StreamExt as FuturesStreamExt};
 use std::io::Read;
 use std::ops::Index;
 use std::sync::Arc;
@@ -180,7 +181,7 @@ impl Default for ApiTestApp {
                 1
             });
 
-        let (http_tx, http_rx) = mpsc::channel(100);
+        let (http_tx, http_rx) = mpsc::channel(100000);
 
         Self {
             ws_tx: Default::default(),
@@ -739,24 +740,38 @@ impl ApiTestApp {
                                     return;
                                 }
 
-                                // 立即将所有请求标记为发送中
                                 http_test.stats.pending = 0;
                                 http_test.stats.sending = http_test.send_count;
 
                                 let cfg = Arc::new(http_test.request.to_owned());
                                 let variables = Arc::new(self.project.variables.to_owned());
-                                for _ in 0..http_test.send_count {
-                                    // TODO:现在每次发送变量都是固定的，可以使用lua脚本在发送前改变一些变量
-                                    let ctx_clone = ctx.clone();
-                                    let req_cfg = cfg.clone();
-                                    let vars = variables.clone();
-                                    let tx = self.http_tx.clone();
-                                    self.rt.spawn(async move {
-                                        let result = util::http_send(&*req_cfg, &*vars).await;
-                                        let _ = tx.send(result).await;
-                                        ctx_clone.request_repaint();
-                                    });
-                                }
+                                let tx = self.http_tx.clone();
+                                let ctx_clone = ctx.clone();
+                                let send_count = http_test.send_count;
+
+                                self.rt.spawn(async move {
+                                    let max_concurrent = 10000;
+                                    let mut futures = FuturesUnordered::new();
+                                    let mut sent = 0;
+
+                                    while sent < send_count || !futures.is_empty() {
+                                        while sent < send_count && futures.len() < max_concurrent {
+                                            let req_cfg = cfg.clone();
+                                            let vars = variables.clone();
+                                            let tx = tx.clone();
+
+                                            futures.push(async move {
+                                                let result = util::http_send(&*req_cfg, &*vars).await;
+                                                let _ = tx.send(result).await;
+                                            });
+                                            sent += 1;
+                                        }
+
+                                        if let Some(_) = futures.next().await {
+                                            ctx_clone.request_repaint();
+                                        }
+                                    }
+                                });
                             }
                         }
 
@@ -1277,41 +1292,52 @@ impl eframe::App for ApiTestApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 接收HTTP响应
-        while let Ok(result) = self.http_rx.try_recv() {
-            if let Some((i, ii)) = self.select_test {
-                if let Some(group) = self.project.groups.get_mut(i) {
-                    if let Some(http_test) = group.childrent.get_mut(ii) {
-                        match result {
-                            Ok(response) => {
-                                http_test.stats.response_times.push(response.duration);
-                                http_test.stats.total_upload_bytes += response.request_size;
-                                http_test.stats.total_download_bytes += response.response_size;
+        // 批量接收HTTP响应，限制每帧处理的数量
+        let mut processed = 0;
+        const MAX_PROCESS_PER_FRAME: usize = 1000;
 
-                                // 判断 HTTP 状态码：2xx 算成功，其他算失败
-                                let is_success = response.status.is_success();
-                                http_test.response = Some(response);
-                                http_test.stats.sending -= 1;
+        while processed < MAX_PROCESS_PER_FRAME {
+            match self.http_rx.try_recv() {
+                Ok(result) => {
+                    if let Some((i, ii)) = self.select_test {
+                        if let Some(group) = self.project.groups.get_mut(i) {
+                            if let Some(http_test) = group.childrent.get_mut(ii) {
+                                match result {
+                                    Ok(response) => {
+                                        http_test.stats.add_response_time(response.duration);
+                                        http_test.stats.total_upload_bytes += response.request_size;
+                                        http_test.stats.total_download_bytes += response.response_size;
 
-                                if is_success {
-                                    http_test.stats.success += 1;
-                                } else {
-                                    http_test.stats.failed += 1;
+                                        let is_success = response.status.is_success();
+                                        http_test.response = Some(response);
+                                        http_test.stats.sending -= 1;
+
+                                        if is_success {
+                                            http_test.stats.success += 1;
+                                        } else {
+                                            http_test.stats.failed += 1;
+                                        }
+                                    }
+                                    Err(_) => {
+                                        http_test.stats.sending -= 1;
+                                        http_test.stats.failed += 1;
+                                    }
+                                }
+
+                                if http_test.stats.sending == 0 {
+                                    http_test.stats.total_end_time = Some(std::time::Instant::now());
                                 }
                             }
-                            Err(_) => {
-                                // 网络错误也算失败
-                                http_test.stats.sending -= 1;
-                                http_test.stats.failed += 1;
-                            }
-                        }
-
-                        if http_test.stats.sending == 0 {
-                            http_test.stats.total_end_time = Some(std::time::Instant::now());
                         }
                     }
+                    processed += 1;
                 }
+                Err(_) => break,
             }
+        }
+
+        if processed > 0 {
+            ctx.request_repaint();
         }
 
         // 删除group
