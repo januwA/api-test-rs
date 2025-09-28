@@ -825,27 +825,7 @@ impl ApiTestApp {
                                 let send_count = http_test.send_count;
 
                                 self.rt.spawn(async move {
-                                    let max_concurrent = 10000;
-                                    let mut futures = FuturesUnordered::new();
-                                    let mut sent = 0;
-
-                                    while sent < send_count || !futures.is_empty() {
-                                        while sent < send_count && futures.len() < max_concurrent {
-                                            let req_cfg = cfg.clone();
-                                            let vars = variables.clone();
-                                            let tx = tx.clone();
-
-                                            futures.push(async move {
-                                                let result = util::http_send(&*req_cfg, &*vars).await;
-                                                let _ = tx.send(result).await;
-                                            });
-                                            sent += 1;
-                                        }
-
-                                        if futures.next().await.is_some() {
-                                        }
-                                    }
-                                    ctx_clone.request_repaint();
+                                    Self::send_http_batch(cfg, variables, tx, ctx_clone, send_count).await;
                                 });
                             }
                         }
@@ -1045,31 +1025,7 @@ impl ApiTestApp {
                         return;
                     };
                     // 从字节码中初始化数据
-                    let (processed_text, has_img) = if let Some(data_vec) = &response.data_vec {
-                        let isjson = response.content_type_json();
-                        let isimg = response.content_type_image();
-
-                        if isimg {
-                            ui.ctx().forget_image("bytes://");
-                            (None, true)
-                        } else {
-                            let mut data = std::str::from_utf8(data_vec.as_ref())
-                                .unwrap_or("")
-                                .to_owned();
-
-                            if self.is_pretty && isjson {
-                                if let Ok(j) = serde_json::from_str::<serde_json::Value>(&data) {
-                                    if let Ok(pretty_data) = serde_json::to_string_pretty(&j) {
-                                        data = pretty_data;
-                                    }
-                                }
-                            }
-
-                            (Some(data), false)
-                        }
-                    } else {
-                        (None, false)
-                    };
+                    let (processed_text, has_img) = ApiTestApp::process_response_data(self.is_pretty, ui.ctx(), response);
 
                     // 请求返回状态
                     ui.horizontal(|ui| {
@@ -1427,6 +1383,136 @@ impl ApiTestApp {
     }
 }
 
+impl ApiTestApp {
+    async fn send_http_batch(
+        cfg: Arc<HttpRequestConfig>,
+        variables: Arc<Vec<PairUi>>,
+        tx: tokio::sync::mpsc::Sender<Result<HttpResponse>>,
+        ctx_clone: egui::Context,
+        send_count: usize
+    ) {
+        let max_concurrent = 10000;
+        let mut futures = FuturesUnordered::new();
+        let mut sent = 0;
+
+        while sent < send_count || !futures.is_empty() {
+            while sent < send_count && futures.len() < max_concurrent {
+                let req_cfg = cfg.clone();
+                let vars = variables.clone();
+                let tx = tx.clone();
+
+                futures.push(async move {
+                    let result = util::http_send(&*req_cfg, &*vars).await;
+                    let _ = tx.send(result).await;
+                });
+                sent += 1;
+            }
+
+            if futures.next().await.is_some() {
+            }
+        }
+        ctx_clone.request_repaint();
+    }
+
+    fn process_response_data(is_pretty: bool, ctx: &egui::Context, response: &HttpResponse) -> (Option<String>, bool) {
+        let Some(data_vec) = &response.data_vec else {
+            return (None, false);
+        };
+
+        if response.content_type_image() {
+            ctx.forget_image("bytes://");
+            return (None, true);
+        }
+
+        let mut data = std::str::from_utf8(data_vec.as_ref())
+            .unwrap_or("")
+            .to_owned();
+
+        if is_pretty && response.content_type_json() {
+            if let Ok(j) = serde_json::from_str::<serde_json::Value>(&data) {
+                if let Ok(pretty_data) = serde_json::to_string_pretty(&j) {
+                    data = pretty_data;
+                }
+            }
+        }
+
+        (Some(data), false)
+    }
+
+    fn process_http_responses(&mut self, ctx: &egui::Context) {
+        const MAX_PROCESS_PER_FRAME: usize = 1000;
+        let mut processed = 0;
+
+        while processed < MAX_PROCESS_PER_FRAME {
+            let result = match self.http_rx.try_recv() {
+                Ok(result) => result,
+                Err(_) => break,
+            };
+
+            self.handle_http_response(result);
+            processed += 1;
+        }
+
+        if processed > 0 {
+            ctx.request_repaint();
+        }
+    }
+
+    fn handle_http_response(&mut self, result: Result<HttpResponse>) {
+        let Some((group_idx, test_idx)) = self.select_test else {
+            return;
+        };
+
+        let Some(group) = self.project.groups.get_mut(group_idx) else {
+            return;
+        };
+
+        let Some(http_test) = group.childrent.get_mut(test_idx) else {
+            return;
+        };
+
+        match result {
+            Ok(response) => {
+                http_test.stats.add_response_time(response.duration);
+                http_test.stats.total_upload_bytes += response.request_size;
+                http_test.stats.total_download_bytes += response.response_size;
+
+                let is_success = response.status.is_success();
+                http_test.response = Some(response);
+                http_test.stats.sending -= 1;
+
+                if is_success {
+                    http_test.stats.success += 1;
+                } else {
+                    http_test.stats.failed += 1;
+                }
+            }
+            Err(_) => {
+                http_test.stats.sending -= 1;
+                http_test.stats.failed += 1;
+            }
+        }
+
+        if http_test.stats.sending == 0 {
+            http_test.stats.total_end_time = Some(std::time::Instant::now());
+        }
+    }
+
+    fn cleanup_ui_state(&mut self) {
+        // 删除group
+        if let Some(i) = self.remove_group {
+            self.project.groups.remove(i);
+            self.remove_group = None;
+        }
+
+        // 删除group.children
+        if let Some((i, ii)) = self.remove_test {
+            self.project.groups[i].childrent.remove(ii);
+            self.remove_test = None;
+        }
+    }
+}
+
 impl eframe::App for ApiTestApp {
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
         self.save_current_project();
@@ -1434,66 +1520,8 @@ impl eframe::App for ApiTestApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 批量接收HTTP响应，限制每帧处理的数量
-        let mut processed = 0;
-        const MAX_PROCESS_PER_FRAME: usize = 1000;
-
-        while processed < MAX_PROCESS_PER_FRAME {
-            match self.http_rx.try_recv() {
-                Ok(result) => {
-                    if let Some((i, ii)) = self.select_test {
-                        if let Some(group) = self.project.groups.get_mut(i) {
-                            if let Some(http_test) = group.childrent.get_mut(ii) {
-                                match result {
-                                    Ok(response) => {
-                                        http_test.stats.add_response_time(response.duration);
-                                        http_test.stats.total_upload_bytes += response.request_size;
-                                        http_test.stats.total_download_bytes += response.response_size;
-
-                                        let is_success = response.status.is_success();
-                                        http_test.response = Some(response);
-                                        http_test.stats.sending -= 1;
-
-                                        if is_success {
-                                            http_test.stats.success += 1;
-                                        } else {
-                                            http_test.stats.failed += 1;
-                                        }
-                                    }
-                                    Err(_) => {
-                                        http_test.stats.sending -= 1;
-                                        http_test.stats.failed += 1;
-                                    }
-                                }
-
-                                if http_test.stats.sending == 0 {
-                                    http_test.stats.total_end_time = Some(std::time::Instant::now());
-                                }
-                            }
-                        }
-                    }
-                    processed += 1;
-                }
-                Err(_) => break,
-            }
-        }
-
-        if processed > 0 {
-            ctx.request_repaint();
-        }
-
-        // 删除group
-        if let Some(i) = self.remove_group {
-            self.project.groups.remove(i);
-            self.remove_group = None
-        }
-
-        // 删除group.children
-        if let Some((i, ii)) = self.remove_test {
-            self.project.groups[i].childrent.remove(ii);
-            self.remove_test = None
-        }
-
+        self.process_http_responses(ctx);
+        self.cleanup_ui_state();
         self.ui_modal(ctx);
         self.ui_top_menus(ctx);
         self.ui_left_panel(ctx);
