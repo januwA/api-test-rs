@@ -140,10 +140,11 @@ fn configure_text_styles(ctx: &egui::Context) {
 
 struct ApiTestApp {
     rt: Runtime,
-    tx: mpsc::Sender<Result<HttpResponse>>,
-    rx: mpsc::Receiver<Result<HttpResponse>>,
     ws_tx: Option<tokio::sync::mpsc::Sender<WsMessage>>,
     ws_messages: Arc<std::sync::RwLock<Vec<Message>>>,
+
+    http_tx: mpsc::Sender<Result<HttpResponse>>,
+    http_rx: mpsc::Receiver<Result<HttpResponse>>,
 
     // 加载保存的项目文件路径
     project_path: String,
@@ -172,20 +173,19 @@ struct ApiTestApp {
 
 impl Default for ApiTestApp {
     fn default() -> Self {
-        let (tx, rx) = mpsc::channel::<Result<HttpResponse>>(32);
-
         let num_worker_threads = thread::available_parallelism()
             .map(|p| p.get())
             .unwrap_or_else(|_| {
                 eprintln!("无法获取系统并行度，使用默认值 1");
                 1
             });
-        
-        // 在这里clone一份rx
+
+        let (http_tx, http_rx) = mpsc::channel(100);
+
         Self {
-            tx,
-            rx,
             ws_tx: Default::default(),
+            http_tx,
+            http_rx,
             rt: tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .worker_threads(num_worker_threads) // Explicitly set the worker threads
@@ -688,28 +688,6 @@ impl ApiTestApp {
                         });
                     };
 
-                    // 渲染时尝试获取请求返回值，如果不渲染就不会去获取，其它方法使用Arc+Mutex
-                    match self.rx.try_recv() {
-                        Ok(data) => {
-                            match data {
-                                Ok(res) => {
-                                    http_test.s_e.0 += 1;
-                                    // TODO: 使用lua脚本让使用者自行判断该请求是成功还是失败
-                                    if http_test.response.is_none() {
-                                        http_test.response = Some(res);
-                                    } else {
-                                        // httpConfig.response_vec.push(res);
-                                    }
-                                }
-                                Err(_) => {
-                                    http_test.s_e.1 += 1;
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // 没有消息，或其他错误
-                        }
-                    }
 
                     // 请求方式
                     ui.horizontal(|ui| {
@@ -760,25 +738,23 @@ impl ApiTestApp {
                                 if http_test.send_count <= 0 {
                                     return;
                                 }
+
+                                // 立即将所有请求标记为发送中
+                                http_test.stats.pending = 0;
+                                http_test.stats.sending = http_test.send_count;
+
                                 let cfg = Arc::new(http_test.request.to_owned());
                                 let variables = Arc::new(self.project.variables.to_owned());
                                 for _ in 0..http_test.send_count {
-                                    let req_cfg = cfg.clone();
                                     // TODO:现在每次发送变量都是固定的，可以使用lua脚本在发送前改变一些变量
+                                    let ctx_clone = ctx.clone();
+                                    let req_cfg = cfg.clone();
                                     let vars = variables.clone();
-                                    let tx = self.tx.clone();
+                                    let tx = self.http_tx.clone();
                                     self.rt.spawn(async move {
-                                        match tx
-                                            .send(util::http_send(&*req_cfg, &*vars).await)
-                                            .await
-                                        {
-                                            Ok(_) => {
-                                                println!("send ok");
-                                            }
-                                            Err(_) => {
-                                                println!("send err");
-                                            }
-                                        };
+                                        let result = util::http_send(&*req_cfg, &*vars).await;
+                                        let _ = tx.send(result).await;
+                                        ctx_clone.request_repaint();
                                     });
                                 }
                             }
@@ -787,8 +763,11 @@ impl ApiTestApp {
                         if http_test.request.method != Method::WS {
                             ui.separator();
                             // request result count
-                            let (s, e) = &http_test.s_e;
-                            ui.label(format!("s:{s}, e:{e}"));
+                            let stats = &http_test.stats;
+                            ui.label(format!(
+                                "等待:{} 发送中:{} 成功:{} 失败:{}",
+                                stats.pending, stats.sending, stats.success, stats.failed
+                            ));
                         }
                     });
                     ui.separator();
@@ -919,35 +898,35 @@ impl ApiTestApp {
                     }
 
                     // 请求结果
-                    let Some(response) = &mut http_test.response else {
+                    let Some(ref response) = http_test.response else {
                         return;
                     };
                     // 从字节码中初始化数据
-                    if let Some(data_vec) = &response.data_vec {
+                    let (processed_text, has_img) = if let Some(data_vec) = &response.data_vec {
                         let isjson = response.content_type_json();
                         let isimg = response.content_type_image();
 
-                        // 初始化图片或字符串数据
                         if isimg {
-                            response.img.get_or_insert_with(|| {
-                                ui.ctx().forget_image("bytes://");
-                                ()
-                            });
+                            ui.ctx().forget_image("bytes://");
+                            (None, true)
                         } else {
-                            response.text.get_or_insert_with(|| {
-                                let mut data = std::str::from_utf8(data_vec.as_ref())
-                                    .unwrap_or("")
-                                    .to_owned();
+                            let mut data = std::str::from_utf8(data_vec.as_ref())
+                                .unwrap_or("")
+                                .to_owned();
 
-                                if self.is_pretty && isjson {
-                                    let j: serde_json::Value = serde_json::from_str(&data).unwrap();
-                                    data = serde_json::to_string_pretty(&j).unwrap();
+                            if self.is_pretty && isjson {
+                                if let Ok(j) = serde_json::from_str::<serde_json::Value>(&data) {
+                                    if let Ok(pretty_data) = serde_json::to_string_pretty(&j) {
+                                        data = pretty_data;
+                                    }
                                 }
+                            }
 
-                                data
-                            });
+                            (Some(data), false)
                         }
-                    }
+                    } else {
+                        (None, false)
+                    };
 
                     // 请求返回状态
                     ui.horizontal(|ui| {
@@ -1004,8 +983,7 @@ impl ApiTestApp {
                     match http_test.response_tab_ui {
                         ResponseTab::Data => match &response.data_vec {
                             Some(data_vec) => {
-                                let isimg = response.content_type_image();
-                                if !isimg {
+                                if !has_img {
                                     if ui.radio(self.is_pretty, "Pretty").clicked() {
                                         self.is_pretty = !self.is_pretty;
                                     }
@@ -1017,7 +995,7 @@ impl ApiTestApp {
                                     .id_salt("response data scroll")
                                     .auto_shrink([false, false])
                                     .show(ui, |ui| {
-                                        if let Some(_) = &response.img {
+                                        if has_img {
                                             ui.add(
                                                 egui::Image::from_bytes(
                                                     "bytes://",
@@ -1025,7 +1003,7 @@ impl ApiTestApp {
                                                 )
                                                 .rounding(5.0),
                                             );
-                                        } else if let Some(text_data) = response.text.as_ref() {
+                                        } else if let Some(text_data) = &processed_text {
                                             widget::code_view_ui(ui, text_data);
                                         } else {
                                             widget::error_label(ui, "其他类型");
@@ -1157,6 +1135,27 @@ impl eframe::App for ApiTestApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 接收HTTP响应
+        while let Ok(result) = self.http_rx.try_recv() {
+            if let Some((i, ii)) = self.select_test {
+                if let Some(group) = self.project.groups.get_mut(i) {
+                    if let Some(http_test) = group.childrent.get_mut(ii) {
+                        match result {
+                            Ok(response) => {
+                                http_test.response = Some(response);
+                                http_test.stats.sending -= 1;
+                                http_test.stats.success += 1;
+                            }
+                            Err(_) => {
+                                http_test.stats.sending -= 1;
+                                http_test.stats.failed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 删除group
         if let Some(i) = self.remove_group {
             self.project.groups.remove(i);

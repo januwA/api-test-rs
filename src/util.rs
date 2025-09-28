@@ -210,7 +210,6 @@ pub fn save_project(dir: &str, project: &Project) -> Result<()> {
 
 pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Result<HttpResponse> {
     let request_builder = req_cfg.request_build(vars).await?;
-    println!("请求已返回");
     let start_time = std::time::Instant::now();
     let response = request_builder.send().await?;
     let duration = start_time.elapsed().as_millis();

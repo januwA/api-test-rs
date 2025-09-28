@@ -18,6 +18,14 @@ pub enum WsMessage {
     ReadMessage,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RequestStats {
+    pub pending: usize,
+    pub sending: usize,
+    pub success: usize,
+    pub failed: usize,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HttpRequestConfig {
     pub method: Method,
@@ -187,7 +195,7 @@ pub struct HttpTest {
     pub response_vec: Vec<HttpResponse>,
 
     #[serde(skip)]
-    pub s_e: (usize, usize),
+    pub stats: RequestStats,
 
     #[serde(skip)]
     pub download_path: String,
@@ -203,7 +211,12 @@ impl HttpTest {
         self.response_vec.clear();
         // init result vec size
         self.response_vec = Vec::with_capacity(self.send_count);
-        self.s_e = (0, 0);
+        self.stats = RequestStats {
+            pending: self.send_count,
+            sending: 0,
+            success: 0,
+            failed: 0,
+        };
     }
     pub fn from_name(name: String) -> Self {
         Self {
@@ -225,7 +238,7 @@ impl Clone for HttpTest {
             response_vec: Default::default(),
             send_count_ui: self.send_count_ui.to_owned(),
             send_count: 0,
-            s_e: (0, 0),
+            stats: Default::default(),
         }
     }
 }
@@ -241,12 +254,13 @@ impl Default for HttpTest {
             request: HttpRequestConfig::default(),
             response_vec: Default::default(),
             send_count_ui: String::from("1"),
-            s_e: (0, 0),
+            stats: Default::default(),
             send_count: 0,
         }
     }
 }
 
+#[derive(Clone)]
 pub struct HttpResponse {
     pub headers: HeaderMap,
     pub headers_str: String,
