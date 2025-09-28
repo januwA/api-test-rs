@@ -1,7 +1,23 @@
 use anyhow::{bail, Result};
 use reqwest::{header::HeaderMap, RequestBuilder};
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 mod util;
+
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn get_http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(10000)
+            .pool_idle_timeout(std::time::Duration::from_secs(60))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("Failed to create HTTP client")
+    })
+}
 
 const CONTENT_TYPE: &str = "Content-Type";
 const TEXT_PLAIN: &str = "text/plain";
@@ -77,7 +93,11 @@ impl RequestStats {
         if self.response_times.len() < self.max_response_times {
             self.response_times.push(time);
         } else if self.max_response_times > 0 {
-            let idx = rand::random::<usize>() % self.max_response_times;
+            use std::collections::hash_map::RandomState;
+            use std::hash::{BuildHasher, Hash, Hasher};
+            let mut hasher = RandomState::new().build_hasher();
+            time.hash(&mut hasher);
+            let idx = (hasher.finish() as usize) % self.max_response_times;
             self.response_times[idx] = time;
         }
     }
@@ -240,11 +260,7 @@ impl HttpRequestConfig {
         let body_raw = self.body_raw.to_owned();
         // let body_raw = util::parse_var_str(&self.body_raw, vars);
 
-        let client = reqwest::Client::builder()
-            .pool_max_idle_per_host(10000)
-            .pool_idle_timeout(std::time::Duration::from_secs(60))
-            .tcp_keepalive(std::time::Duration::from_secs(60))
-            .build()?;
+        let client = get_http_client();
 
         let mut request_builder = client.request(method, &real_url);
 
@@ -359,8 +375,6 @@ impl HttpTest {
         self.send_count = self.send_count_ui.parse().unwrap_or(0);
         self.response = None;
         self.response_vec.clear();
-        // init result vec size
-        self.response_vec = Vec::with_capacity(self.send_count);
         let max_samples = 100000.min(self.send_count);
         self.stats = RequestStats {
             pending: self.send_count,

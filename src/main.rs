@@ -767,10 +767,10 @@ impl ApiTestApp {
                                             sent += 1;
                                         }
 
-                                        if let Some(_) = futures.next().await {
-                                            ctx_clone.request_repaint();
+                                        if futures.next().await.is_some() {
                                         }
                                     }
+                                    ctx_clone.request_repaint();
                                 });
                             }
                         }
