@@ -209,6 +209,15 @@ pub fn save_project(dir: &str, project: &Project) -> Result<()> {
 }
 
 pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Result<HttpResponse> {
+    let mut request_size = 0u64;
+    request_size += req_cfg.url.len() as u64;
+    request_size += req_cfg.body_raw.len() as u64;
+    for kv in &req_cfg.header {
+        if !kv.disable {
+            request_size += kv.key.len() as u64 + kv.value.len() as u64;
+        }
+    }
+
     let request_builder = req_cfg.request_build(vars).await?;
     let start_time = std::time::Instant::now();
     let response = request_builder.send().await?;
@@ -217,7 +226,9 @@ pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Resul
     let version = response.version();
     let headers = response.headers().to_owned();
     let data_vec = response.bytes().await.and_then(|bs| Ok(bs.to_vec())).ok();
-    
+
+    let response_size = data_vec.as_ref().map(|v| v.len() as u64).unwrap_or(0);
+
     let mut headers_str = String::new();
     headers.iter().for_each(|(name, val)| {
         let name = name.as_str();
@@ -234,6 +245,8 @@ pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Resul
         text: None,
         headers_str,
         duration,
+        request_size,
+        response_size,
     })
 }
 

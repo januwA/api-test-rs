@@ -2,3 +2,4 @@
 /_SAVE
 *.json
 .env
+.claude

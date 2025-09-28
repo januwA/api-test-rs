@@ -24,6 +24,142 @@ pub struct RequestStats {
     pub sending: usize,
     pub success: usize,
     pub failed: usize,
+    pub response_times: Vec<u128>,
+    pub total_start_time: Option<std::time::Instant>,
+    pub total_end_time: Option<std::time::Instant>,
+    pub total_upload_bytes: u64,
+    pub total_download_bytes: u64,
+}
+
+impl RequestStats {
+    pub fn total_requests(&self) -> usize {
+        self.success + self.failed
+    }
+
+    pub fn success_rate(&self) -> f64 {
+        let total = self.total_requests();
+        if total == 0 {
+            0.0
+        } else {
+            (self.success as f64 / total as f64) * 100.0
+        }
+    }
+
+    pub fn min_response_time(&self) -> Option<u128> {
+        self.response_times.iter().min().copied()
+    }
+
+    pub fn max_response_time(&self) -> Option<u128> {
+        self.response_times.iter().max().copied()
+    }
+
+    pub fn avg_response_time(&self) -> Option<f64> {
+        if self.response_times.is_empty() {
+            None
+        } else {
+            let sum: u128 = self.response_times.iter().sum();
+            Some(sum as f64 / self.response_times.len() as f64)
+        }
+    }
+
+    pub fn percentile(&self, p: f64) -> Option<u128> {
+        if self.response_times.is_empty() {
+            return None;
+        }
+        let mut sorted = self.response_times.clone();
+        sorted.sort();
+        let index = ((p / 100.0) * sorted.len() as f64).ceil() as usize - 1;
+        sorted.get(index.min(sorted.len() - 1)).copied()
+    }
+
+    pub fn qps(&self) -> Option<f64> {
+        if let (Some(start), Some(end)) = (self.total_start_time, self.total_end_time) {
+            let duration = end.duration_since(start).as_secs_f64();
+            if duration > 0.0 {
+                Some(self.total_requests() as f64 / duration)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn total_duration(&self) -> Option<f64> {
+        if let (Some(start), Some(end)) = (self.total_start_time, self.total_end_time) {
+            Some(end.duration_since(start).as_secs_f64())
+        } else {
+            None
+        }
+    }
+
+    pub fn current_duration(&self) -> Option<f64> {
+        if let Some(start) = self.total_start_time {
+            Some(std::time::Instant::now().duration_since(start).as_secs_f64())
+        } else {
+            None
+        }
+    }
+
+    pub fn upload_throughput_mbps(&self) -> Option<f64> {
+        if let Some(duration) = self.total_duration() {
+            if duration > 0.0 {
+                Some((self.total_upload_bytes as f64 / 1024.0 / 1024.0) / duration)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn download_throughput_mbps(&self) -> Option<f64> {
+        if let Some(duration) = self.total_duration() {
+            if duration > 0.0 {
+                Some((self.total_download_bytes as f64 / 1024.0 / 1024.0) / duration)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn realtime_qps(&self) -> Option<f64> {
+        if let Some(duration) = self.current_duration() {
+            if duration > 0.0 {
+                Some(self.total_requests() as f64 / duration)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn realtime_upload_throughput_mbps(&self) -> Option<f64> {
+        if let Some(duration) = self.current_duration() {
+            if duration > 0.0 {
+                Some((self.total_upload_bytes as f64 / 1024.0 / 1024.0) / duration)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn realtime_download_throughput_mbps(&self) -> Option<f64> {
+        if let Some(duration) = self.current_duration() {
+            if duration > 0.0 {
+                Some((self.total_download_bytes as f64 / 1024.0 / 1024.0) / duration)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -216,6 +352,11 @@ impl HttpTest {
             sending: 0,
             success: 0,
             failed: 0,
+            response_times: Vec::with_capacity(self.send_count),
+            total_start_time: Some(std::time::Instant::now()),
+            total_end_time: None,
+            total_upload_bytes: 0,
+            total_download_bytes: 0,
         };
     }
     pub fn from_name(name: String) -> Self {
@@ -270,6 +411,8 @@ pub struct HttpResponse {
     pub text: Option<String>,
     pub data_vec: Option<Vec<u8>>,
     pub duration: u128,
+    pub request_size: u64,
+    pub response_size: u64,
 }
 
 impl HttpResponse {
@@ -368,6 +511,7 @@ impl Default for RequestBodyRawType {
 pub enum ResponseTab {
     Data,
     Header,
+    Stats,
 }
 
 impl Default for ResponseTab {

@@ -58,7 +58,7 @@ const REQ_BODY_RAW_TYPES: [RequestBodyRawType; 5] = [
 const WS_BODY_RAW_TYPES: [RequestBodyRawType; 2] =
     [RequestBodyRawType::Text, RequestBodyRawType::BinaryFile];
 const COLUMN_WIDTH_INITIAL: f32 = 200.0;
-const RESPONSE_TABS: [ResponseTab; 2] = [ResponseTab::Data, ResponseTab::Header];
+const RESPONSE_TABS: [ResponseTab; 3] = [ResponseTab::Data, ResponseTab::Header, ResponseTab::Stats];
 /* #endregion */
 
 fn main() -> eframe::Result {
@@ -764,10 +764,25 @@ impl ApiTestApp {
                             ui.separator();
                             // request result count
                             let stats = &http_test.stats;
-                            ui.label(format!(
-                                "等待:{} 发送中:{} 成功:{} 失败:{}",
-                                stats.pending, stats.sending, stats.success, stats.failed
-                            ));
+                            ui.horizontal(|ui| {
+                                ui.label(format!(
+                                    "等待:{} 发送中:{} 成功:{} 失败:{}",
+                                    stats.pending, stats.sending, stats.success, stats.failed
+                                ));
+
+                                if stats.sending > 0 {
+                                    ui.separator();
+                                    if let Some(qps) = stats.realtime_qps() {
+                                        ui.label(format!("实时QPS: {:.0}", qps));
+                                    }
+                                    if let Some(up) = stats.realtime_upload_throughput_mbps() {
+                                        ui.label(format!("上传: {:.2} MB/s", up));
+                                    }
+                                    if let Some(down) = stats.realtime_download_throughput_mbps() {
+                                        ui.label(format!("下载: {:.2} MB/s", down));
+                                    }
+                                }
+                            });
                         }
                     });
                     ui.separator();
@@ -942,29 +957,33 @@ impl ApiTestApp {
                                 egui::TextEdit::singleline(&mut http_test.download_path)
                                     .hint_text(r#"c:/out.(jpg|txt)"#),
                             );
-                            if ui
-                                .add_enabled(
-                                    !http_test.download_path.is_empty(),
-                                    egui::Button::new(match http_test.response_tab_ui {
-                                        ResponseTab::Data => "Download Data",
-                                        ResponseTab::Header => "Download Header",
-                                    }),
-                                )
-                                .clicked()
-                            {
-                                match util::download(
-                                    &http_test.request.url,
-                                    &http_test.download_path,
-                                    match http_test.response_tab_ui {
-                                        ResponseTab::Data => data_vec,
-                                        ResponseTab::Header => response.headers_str.as_bytes(),
-                                    },
-                                ) {
-                                    Ok(_) => {
-                                        self.action_status = "Downlaod Ok".to_owned();
-                                    }
-                                    Err(err) => {
-                                        self.action_status = err.to_string();
+                            if http_test.response_tab_ui != ResponseTab::Stats {
+                                if ui
+                                    .add_enabled(
+                                        !http_test.download_path.is_empty(),
+                                        egui::Button::new(match http_test.response_tab_ui {
+                                            ResponseTab::Data => "Download Data",
+                                            ResponseTab::Header => "Download Header",
+                                            ResponseTab::Stats => "",
+                                        }),
+                                    )
+                                    .clicked()
+                                {
+                                    match util::download(
+                                        &http_test.request.url,
+                                        &http_test.download_path,
+                                        match http_test.response_tab_ui {
+                                            ResponseTab::Data => data_vec,
+                                            ResponseTab::Header => response.headers_str.as_bytes(),
+                                            ResponseTab::Stats => &[],
+                                        },
+                                    ) {
+                                        Ok(_) => {
+                                            self.action_status = "Downlaod Ok".to_owned();
+                                        }
+                                        Err(err) => {
+                                            self.action_status = err.to_string();
+                                        }
                                     }
                                 }
                             }
@@ -1025,6 +1044,129 @@ impl ApiTestApp {
                                         widget::code_view_ui(ui, &response.headers_str);
                                     });
                                 });
+                        }
+                        ResponseTab::Stats => {
+                            let stats = &http_test.stats;
+                            if stats.total_requests() > 0 {
+                                ui.vertical(|ui| {
+                                    ui.heading("请求统计");
+                                    ui.separator();
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("总请求数:");
+                                        ui.label(format!("{}", stats.total_requests()));
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("成功:");
+                                        ui.label(format!("{}", stats.success));
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("失败:");
+                                        ui.label(format!("{}", stats.failed));
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("成功率:");
+                                        ui.label(format!("{:.2}%", stats.success_rate()));
+                                    });
+
+                                    ui.separator();
+                                    ui.heading("响应时间统计");
+                                    ui.separator();
+
+                                    if let Some(min) = stats.min_response_time() {
+                                        ui.horizontal(|ui| {
+                                            ui.label("最小响应时间 (Min):");
+                                            ui.label(format!("{} ms", min));
+                                        });
+                                    }
+
+                                    if let Some(avg) = stats.avg_response_time() {
+                                        ui.horizontal(|ui| {
+                                            ui.label("平均响应时间 (Avg):");
+                                            ui.label(format!("{:.2} ms", avg));
+                                        });
+                                    }
+
+                                    if let Some(max) = stats.max_response_time() {
+                                        ui.horizontal(|ui| {
+                                            ui.label("最大响应时间 (Max):");
+                                            ui.label(format!("{} ms", max));
+                                        });
+                                    }
+
+                                    if let Some(p50) = stats.percentile(50.0) {
+                                        ui.horizontal(|ui| {
+                                            ui.label("中位数 (P50):");
+                                            ui.label(format!("{} ms", p50));
+                                        });
+                                    }
+
+                                    if let Some(p95) = stats.percentile(95.0) {
+                                        ui.horizontal(|ui| {
+                                            ui.label("P95:");
+                                            ui.label(format!("{} ms", p95));
+                                        });
+                                    }
+
+                                    if let Some(p99) = stats.percentile(99.0) {
+                                        ui.horizontal(|ui| {
+                                            ui.label("P99:");
+                                            ui.label(format!("{} ms", p99));
+                                        });
+                                    }
+
+                                    ui.separator();
+                                    ui.heading("性能统计");
+                                    ui.separator();
+
+                                    if let Some(total_dur) = stats.total_duration() {
+                                        ui.horizontal(|ui| {
+                                            ui.label("总耗时:");
+                                            ui.label(format!("{:.3} s", total_dur));
+                                        });
+                                    }
+
+                                    if let Some(qps) = stats.qps() {
+                                        ui.horizontal(|ui| {
+                                            ui.label("QPS (每秒请求数):");
+                                            ui.label(format!("{:.2}", qps));
+                                        });
+                                    }
+
+                                    ui.separator();
+                                    ui.heading("数据吞吐量");
+                                    ui.separator();
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("总上传数据:");
+                                        ui.label(format!("{:.2} MB", stats.total_upload_bytes as f64 / 1024.0 / 1024.0));
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("总下载数据:");
+                                        ui.label(format!("{:.2} MB", stats.total_download_bytes as f64 / 1024.0 / 1024.0));
+                                    });
+
+                                    if let Some(up) = stats.upload_throughput_mbps() {
+                                        ui.horizontal(|ui| {
+                                            ui.label("上传吞吐量:");
+                                            ui.label(format!("{:.2} MB/s", up));
+                                        });
+                                    }
+
+                                    if let Some(down) = stats.download_throughput_mbps() {
+                                        ui.horizontal(|ui| {
+                                            ui.label("下载吞吐量:");
+                                            ui.label(format!("{:.2} MB/s", down));
+                                        });
+                                    }
+                                });
+                            } else {
+                                ui.label("暂无统计数据");
+                            }
                         }
                     }
                 });
@@ -1142,14 +1284,30 @@ impl eframe::App for ApiTestApp {
                     if let Some(http_test) = group.childrent.get_mut(ii) {
                         match result {
                             Ok(response) => {
+                                http_test.stats.response_times.push(response.duration);
+                                http_test.stats.total_upload_bytes += response.request_size;
+                                http_test.stats.total_download_bytes += response.response_size;
+
+                                // 判断 HTTP 状态码：2xx 算成功，其他算失败
+                                let is_success = response.status.is_success();
                                 http_test.response = Some(response);
                                 http_test.stats.sending -= 1;
-                                http_test.stats.success += 1;
+
+                                if is_success {
+                                    http_test.stats.success += 1;
+                                } else {
+                                    http_test.stats.failed += 1;
+                                }
                             }
                             Err(_) => {
+                                // 网络错误也算失败
                                 http_test.stats.sending -= 1;
                                 http_test.stats.failed += 1;
                             }
+                        }
+
+                        if http_test.stats.sending == 0 {
+                            http_test.stats.total_end_time = Some(std::time::Instant::now());
                         }
                     }
                 }
