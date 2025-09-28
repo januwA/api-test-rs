@@ -8,6 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::BTreeMap;
 use futures::stream::{FuturesUnordered, StreamExt as FuturesStreamExt};
 use std::io::Read;
+use num_format::{Locale, ToFormattedString};
 use std::ops::Index;
 use std::sync::Arc;
 use std::thread; // Add this line
@@ -170,6 +171,7 @@ struct ApiTestApp {
 
     pub modal: ModalOptions,
     worker_thread_count: usize,
+    search_filter: String,
 }
 
 impl Default for ApiTestApp {
@@ -216,6 +218,7 @@ impl Default for ApiTestApp {
             modal: Default::default(),
             ws_messages: Default::default(),
             worker_thread_count: num_worker_threads,
+            search_filter: String::new(),
         }
     }
 }
@@ -507,19 +510,50 @@ impl ApiTestApp {
             .default_width(220.0)
             .width_range(30.0..=600.0)
             .show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("📁").size(18.0));
                     ui.heading(&self.project.name);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("💾").on_hover_text("快速保存项目").clicked() {
+                            self.save_current_project();
+                        }
+                    });
                 });
+                ui.separator();
+
+                // 搜索框
+                ui.horizontal(|ui| {
+                    ui.label("🔍");
+                    let search_response = ui.add(
+                        egui::TextEdit::singleline(&mut self.search_filter)
+                            .hint_text("搜索 Group/Test...")
+                            .desired_width(f32::INFINITY),
+                    );
+                    if !self.search_filter.is_empty() {
+                        if ui.button("❌").on_hover_text("清除搜索").clicked() {
+                            self.search_filter.clear();
+                        }
+                    }
+                });
+                ui.separator();
 
                 egui::ScrollArea::both().show(ui, |ui| {
-                    CollapsingHeader::new("Variables")
+                    let var_count = self.project.variables.len();
+                    CollapsingHeader::new(format!("Variables ({})", var_count))
                         .default_open(false)
                         .show(ui, |ui| {
-                            if ui.button("Add").clicked() {
-                                self.project.variables.push(PairUi::default());
-                            }
+                            ui.horizontal(|ui| {
+                                if ui.button("➕ Add").clicked() {
+                                    self.project.variables.push(PairUi::default());
+                                }
+                                if var_count > 0 {
+                                    if ui.button("🗑️ Clear All").on_hover_text("清除所有变量").clicked() {
+                                        self.project.variables.clear();
+                                    }
+                                }
+                            });
 
-                            ui.separator();
+                            ui.add_space(5.0);
 
                             egui_extras::TableBuilder::new(ui)
                                 .striped(true)
@@ -533,7 +567,7 @@ impl ApiTestApp {
                                 // .scroll_to_row(1, Some(egui::Align::BOTTOM))
                                 .header(20.0, |mut header| {
                                     header.col(|ui| {
-                                        ui.label("");
+                                        ui.label("启用").on_hover_text("勾选以启用该变量");
                                     });
                                     header.col(|ui| {
                                         ui.label("Key");
@@ -550,7 +584,10 @@ impl ApiTestApp {
                                         let mut is_retain = true;
                                         body.row(30.0, |mut row| {
                                             row.col(|ui| {
-                                                ui.checkbox(&mut el.disable, "");
+                                                let mut enabled = !el.disable;
+                                                if ui.checkbox(&mut enabled, "").changed() {
+                                                    el.disable = !enabled;
+                                                }
                                             });
 
                                             row.col(|ui| {
@@ -577,82 +614,107 @@ impl ApiTestApp {
                                     });
                                 });
                         });
-                    ui.separator();
+                    ui.add_space(5.0);
 
-                    let input_add = ui.add(
-                        egui::TextEdit::singleline(&mut self.new_group_name)
-                            .hint_text("Enter Add Group"),
-                    );
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("➕");
+                            let input_add = ui.add(
+                                egui::TextEdit::singleline(&mut self.new_group_name)
+                                    .hint_text("输入组名并按回车添加...")
+                                    .desired_width(f32::INFINITY),
+                            );
 
-                    if input_add.lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        && !self.new_group_name.is_empty()
-                    {
-                        let name = self.new_group_name.to_owned();
-                        let name_exists = self.project.groups.iter().any(|el| el.name == name);
-                        if !name_exists {
-                            self.project.groups.push(Group::from_name(name));
-                            self.new_group_name.clear();
-                        }
-                    }
+                            if input_add.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                && !self.new_group_name.is_empty()
+                            {
+                                let name = self.new_group_name.to_owned();
+                                let name_exists = self.project.groups.iter().any(|el| el.name == name);
+                                if !name_exists {
+                                    self.project.groups.push(Group::from_name(name));
+                                    self.new_group_name.clear();
+                                } else {
+                                    self.action_status = format!("组名 '{}' 已存在", name);
+                                }
+                            }
+                        });
+                    });
+
+                    ui.add_space(5.0);
+
+                    let search_lower = self.search_filter.to_lowercase();
 
                     self.project
                         .groups
                         .iter_mut()
                         .enumerate()
                         .for_each(|(group_index, group)| {
-                            ui.separator();
-                            CollapsingHeader::new(&group.name)
-                                .default_open(false)
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        if ui.button("...").clicked() {
-                                            self.modal.open = true;
-                                            self.modal.title = "Group Edit".to_owned();
-                                            self.select_test = Some((group_index, 0));
-                                            self.modal.r#type = ModalType::HandleGroup;
-                                        }
-                                    });
-                                    ui.separator();
+                            let test_count = group.childrent.len();
 
-                                    ui.with_layout(
-                                        egui::Layout::top_down_justified(egui::Align::Min),
-                                        |ui| {
-                                            group.childrent.iter_mut().enumerate().rev().for_each(
+                            let group_matches = group.name.to_lowercase().contains(&search_lower);
+                            let test_matches: Vec<usize> = group.childrent.iter().enumerate()
+                                .filter(|(_, test)| test.name.to_lowercase().contains(&search_lower))
+                                .map(|(i, _)| i)
+                                .collect();
+
+                            let should_show = self.search_filter.is_empty() || group_matches || !test_matches.is_empty();
+
+                            if should_show {
+                                CollapsingHeader::new(format!("{} ({})", group.name, test_count))
+                                    .default_open(!self.search_filter.is_empty())
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            if ui.button("⚙️").on_hover_text("编辑组").clicked() {
+                                                self.modal.open = true;
+                                                self.modal.title = "Group Edit".to_owned();
+                                                self.select_test = Some((group_index, 0));
+                                                self.modal.r#type = ModalType::HandleGroup;
+                                            }
+                                        });
+
+                                        ui.with_layout(
+                                            egui::Layout::top_down_justified(egui::Align::Min),
+                                            |ui| {
+                                                group.childrent.iter_mut().enumerate().for_each(
                                                 |(cfg_i, cfg)| {
-                                                    let checked = match self.select_test {
-                                                        Some((i, j)) => {
-                                                            i == group_index && j == cfg_i
-                                                        }
-                                                        _ => false,
-                                                    };
+                                                    let test_match = self.search_filter.is_empty() ||
+                                                        cfg.name.to_lowercase().contains(&search_lower);
 
-                                                    ui.horizontal(|ui| {
-                                                        if ui
-                                                            .selectable_label(checked, &cfg.name)
-                                                            .clicked()
-                                                        {
-                                                            self.select_test =
-                                                                Some((group_index, cfg_i));
-                                                        }
+                                                    if test_match {
+                                                        let checked = match self.select_test {
+                                                            Some((i, j)) => {
+                                                                i == group_index && j == cfg_i
+                                                            }
+                                                            _ => false,
+                                                        };
 
-                                                        if ui.button("...").clicked() {
-                                                            self.modal.open = true;
-                                                            self.modal.title =
-                                                                "Test Edit".to_owned();
-                                                            self.select_test =
-                                                                Some((group_index, cfg_i));
-                                                            self.modal.r#type =
-                                                                ModalType::HandleTest;
-                                                        }
-                                                    });
+                                                        ui.horizontal(|ui| {
+                                                            if ui
+                                                                .selectable_label(checked, &cfg.name)
+                                                                .clicked()
+                                                            {
+                                                                self.select_test =
+                                                                    Some((group_index, cfg_i));
+                                                            }
 
-                                                    ui.separator();
+                                                            if ui.button("✏️").on_hover_text("编辑测试").clicked() {
+                                                                self.modal.open = true;
+                                                                self.modal.title =
+                                                                    "Test Edit".to_owned();
+                                                                self.select_test =
+                                                                    Some((group_index, cfg_i));
+                                                                self.modal.r#type =
+                                                                    ModalType::HandleTest;
+                                                            }
+                                                        });
+                                                    }
                                                 },
                                             );
                                         },
                                     );
                                 });
+                            }
                         });
                 });
             });
@@ -690,7 +752,9 @@ impl ApiTestApp {
                     };
 
 
-                    // 请求方式
+                    // 请求方式 - 第一行：输入控件
+                    let is_running = http_test.stats.sending > 0;
+
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt("method")
                             .selected_text(http_test.request.method.as_ref())
@@ -704,23 +768,34 @@ impl ApiTestApp {
                                 }
                             });
 
-                        ui.add(
+                        ui.add_sized(
+                            ui.available_size() - egui::vec2(
+                                if http_test.request.method != Method::WS { 150.0 } else { 70.0 },
+                                0.0
+                            ),
                             egui::TextEdit::singleline(&mut http_test.request.url)
-                                .desired_width(300.)
                                 .hint_text("url"),
                         );
 
                         if http_test.request.method != Method::WS {
-                            ui.add(
+                            let count_input = ui.add(
                                 egui::TextEdit::singleline(&mut http_test.send_count_ui)
-                                    .desired_width(60.)
+                                    .desired_width(80.)
                                     .hint_text("Count"),
                             );
+
+                            if let Ok(count) = http_test.send_count_ui.parse::<usize>() {
+                                if count > 10_000_000 {
+                                    count_input.on_hover_text("警告: 超过1000万可能导致性能问题");
+                                } else if count > 100_000 {
+                                    count_input.on_hover_text("提示: 超过10万可能需要较长时间");
+                                }
+                            }
                         }
 
                         if ui
                             .add_enabled(
-                                !http_test.request.url.is_empty(),
+                                !http_test.request.url.is_empty() && !is_running,
                                 egui::Button::new("Send"),
                             )
                             .clicked()
@@ -775,14 +850,41 @@ impl ApiTestApp {
                             }
                         }
 
-                        if http_test.request.method != Method::WS {
-                            ui.separator();
-                            // request result count
-                            let stats = &http_test.stats;
+                        if is_running {
+                            if ui.button("Cancel").clicked() {
+                                http_test.stats.sending = 0;
+                                http_test.stats.total_end_time = Some(std::time::Instant::now());
+                            }
+                        }
+                    });
+
+                    // 第二行：统计信息和进度条
+                    if http_test.request.method != Method::WS {
+                        let stats = &http_test.stats;
+                        let total = stats.total_requests() + stats.sending;
+
+                        if total > 0 {
                             ui.horizontal(|ui| {
+                                let completed = stats.total_requests();
+                                let progress = completed as f32 / total as f32;
+
+                                ui.add(
+                                    egui::ProgressBar::new(progress)
+                                        .desired_width(200.0)
+                                        .show_percentage()
+                                );
+
                                 ui.label(format!(
-                                    "等待:{} 发送中:{} 成功:{} 失败:{}",
-                                    stats.pending, stats.sending, stats.success, stats.failed
+                                    "完成: {} / {} ({:.1}%)",
+                                    completed.to_formatted_string(&Locale::en),
+                                    total.to_formatted_string(&Locale::en),
+                                    progress * 100.0
+                                ));
+
+                                ui.separator();
+                                ui.label(format!(
+                                    "成功:{} 失败:{}",
+                                    stats.success, stats.failed
                                 ));
 
                                 if stats.sending > 0 {
@@ -796,10 +898,21 @@ impl ApiTestApp {
                                     if let Some(down) = stats.realtime_download_throughput_mbps() {
                                         ui.label(format!("下载: {:.2} MB/s", down));
                                     }
+                                } else if stats.total_requests() > 0 {
+                                    ui.separator();
+                                    if let Some(qps) = stats.qps() {
+                                        ui.label(format!("平均QPS: {:.0}", qps));
+                                    }
+                                    if let Some(up) = stats.upload_throughput_mbps() {
+                                        ui.label(format!("上传: {:.2} MB/s", up));
+                                    }
+                                    if let Some(down) = stats.download_throughput_mbps() {
+                                        ui.label(format!("下载: {:.2} MB/s", down));
+                                    }
                                 }
                             });
                         }
-                    });
+                    }
                     ui.separator();
 
                     // 请求数据
@@ -1063,122 +1176,151 @@ impl ApiTestApp {
                         ResponseTab::Stats => {
                             let stats = &http_test.stats;
                             if stats.total_requests() > 0 {
-                                ui.vertical(|ui| {
-                                    ui.heading("请求统计");
-                                    ui.separator();
+                                egui::ScrollArea::vertical()
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        ui.columns(2, |columns| {
+                                            // 左列：请求统计
+                                            columns[0].group(|ui| {
+                                                ui.heading("📊 请求统计");
+                                                ui.separator();
 
-                                    ui.horizontal(|ui| {
-                                        ui.label("总请求数:");
-                                        ui.label(format!("{}", stats.total_requests()));
+                                                ui.horizontal(|ui| {
+                                                    ui.label("总请求数:");
+                                                    ui.strong(format!("{}", stats.total_requests().to_formatted_string(&Locale::en)));
+                                                });
+
+                                                ui.horizontal(|ui| {
+                                                    ui.label("成功:");
+                                                    ui.colored_label(egui::Color32::GREEN, format!("{}", stats.success.to_formatted_string(&Locale::en)));
+                                                });
+
+                                                ui.horizontal(|ui| {
+                                                    ui.label("失败:");
+                                                    ui.colored_label(egui::Color32::RED, format!("{}", stats.failed.to_formatted_string(&Locale::en)));
+                                                });
+
+                                                ui.add_space(5.0);
+
+                                                // 成功率进度条
+                                                let success_rate = stats.success_rate() / 100.0;
+                                                ui.horizontal(|ui| {
+                                                    ui.label("成功率:");
+                                                    ui.add(
+                                                        egui::ProgressBar::new(success_rate as f32)
+                                                            .desired_width(150.0)
+                                                            .text(format!("{:.2}%", stats.success_rate()))
+                                                    );
+                                                });
+                                            });
+
+                                            // 右列：响应时间统计
+                                            columns[1].group(|ui| {
+                                                ui.heading("⏱️ 响应时间统计");
+                                                ui.separator();
+
+                                                if let Some(min) = stats.min_response_time() {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("最小 (Min):");
+                                                        ui.strong(format!("{} ms", min));
+                                                    });
+                                                }
+
+                                                if let Some(avg) = stats.avg_response_time() {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("平均 (Avg):");
+                                                        ui.strong(format!("{:.2} ms", avg));
+                                                    });
+                                                }
+
+                                                if let Some(max) = stats.max_response_time() {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("最大 (Max):");
+                                                        ui.strong(format!("{} ms", max));
+                                                    });
+                                                }
+
+                                                ui.add_space(5.0);
+                                                ui.label("百分位数:");
+
+                                                if let Some(p50) = stats.percentile(50.0) {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("  P50:");
+                                                        ui.label(format!("{} ms", p50));
+                                                    });
+                                                }
+
+                                                if let Some(p95) = stats.percentile(95.0) {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("  P95:");
+                                                        ui.label(format!("{} ms", p95));
+                                                    });
+                                                }
+
+                                                if let Some(p99) = stats.percentile(99.0) {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("  P99:");
+                                                        ui.label(format!("{} ms", p99));
+                                                    });
+                                                }
+                                            });
+                                        });
+
+                                        ui.separator();
+
+                                        // 性能统计和吞吐量
+                                        ui.columns(2, |columns| {
+                                            columns[0].group(|ui| {
+                                                ui.heading("🚀 性能统计");
+                                                ui.separator();
+
+                                                if let Some(total_dur) = stats.total_duration() {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("总耗时:");
+                                                        ui.strong(format!("{:.3} s", total_dur));
+                                                    });
+                                                }
+
+                                                if let Some(qps) = stats.qps() {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("QPS:");
+                                                        ui.colored_label(egui::Color32::from_rgb(0, 150, 255), format!("{:.0}", qps));
+                                                    });
+                                                }
+                                            });
+
+                                            columns[1].group(|ui| {
+                                                ui.heading("📦 数据吞吐量");
+                                                ui.separator();
+
+                                                ui.horizontal(|ui| {
+                                                    ui.label("上传:");
+                                                    ui.strong(format!("{:.2} MB", stats.total_upload_bytes as f64 / 1024.0 / 1024.0));
+                                                });
+
+                                                ui.horizontal(|ui| {
+                                                    ui.label("下载:");
+                                                    ui.strong(format!("{:.2} MB", stats.total_download_bytes as f64 / 1024.0 / 1024.0));
+                                                });
+
+                                                ui.add_space(5.0);
+
+                                                if let Some(up) = stats.upload_throughput_mbps() {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("上传速度:");
+                                                        ui.label(format!("{:.2} MB/s", up));
+                                                    });
+                                                }
+
+                                                if let Some(down) = stats.download_throughput_mbps() {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("下载速度:");
+                                                        ui.label(format!("{:.2} MB/s", down));
+                                                    });
+                                                }
+                                            });
+                                        });
                                     });
-
-                                    ui.horizontal(|ui| {
-                                        ui.label("成功:");
-                                        ui.label(format!("{}", stats.success));
-                                    });
-
-                                    ui.horizontal(|ui| {
-                                        ui.label("失败:");
-                                        ui.label(format!("{}", stats.failed));
-                                    });
-
-                                    ui.horizontal(|ui| {
-                                        ui.label("成功率:");
-                                        ui.label(format!("{:.2}%", stats.success_rate()));
-                                    });
-
-                                    ui.separator();
-                                    ui.heading("响应时间统计");
-                                    ui.separator();
-
-                                    if let Some(min) = stats.min_response_time() {
-                                        ui.horizontal(|ui| {
-                                            ui.label("最小响应时间 (Min):");
-                                            ui.label(format!("{} ms", min));
-                                        });
-                                    }
-
-                                    if let Some(avg) = stats.avg_response_time() {
-                                        ui.horizontal(|ui| {
-                                            ui.label("平均响应时间 (Avg):");
-                                            ui.label(format!("{:.2} ms", avg));
-                                        });
-                                    }
-
-                                    if let Some(max) = stats.max_response_time() {
-                                        ui.horizontal(|ui| {
-                                            ui.label("最大响应时间 (Max):");
-                                            ui.label(format!("{} ms", max));
-                                        });
-                                    }
-
-                                    if let Some(p50) = stats.percentile(50.0) {
-                                        ui.horizontal(|ui| {
-                                            ui.label("中位数 (P50):");
-                                            ui.label(format!("{} ms", p50));
-                                        });
-                                    }
-
-                                    if let Some(p95) = stats.percentile(95.0) {
-                                        ui.horizontal(|ui| {
-                                            ui.label("P95:");
-                                            ui.label(format!("{} ms", p95));
-                                        });
-                                    }
-
-                                    if let Some(p99) = stats.percentile(99.0) {
-                                        ui.horizontal(|ui| {
-                                            ui.label("P99:");
-                                            ui.label(format!("{} ms", p99));
-                                        });
-                                    }
-
-                                    ui.separator();
-                                    ui.heading("性能统计");
-                                    ui.separator();
-
-                                    if let Some(total_dur) = stats.total_duration() {
-                                        ui.horizontal(|ui| {
-                                            ui.label("总耗时:");
-                                            ui.label(format!("{:.3} s", total_dur));
-                                        });
-                                    }
-
-                                    if let Some(qps) = stats.qps() {
-                                        ui.horizontal(|ui| {
-                                            ui.label("QPS (每秒请求数):");
-                                            ui.label(format!("{:.2}", qps));
-                                        });
-                                    }
-
-                                    ui.separator();
-                                    ui.heading("数据吞吐量");
-                                    ui.separator();
-
-                                    ui.horizontal(|ui| {
-                                        ui.label("总上传数据:");
-                                        ui.label(format!("{:.2} MB", stats.total_upload_bytes as f64 / 1024.0 / 1024.0));
-                                    });
-
-                                    ui.horizontal(|ui| {
-                                        ui.label("总下载数据:");
-                                        ui.label(format!("{:.2} MB", stats.total_download_bytes as f64 / 1024.0 / 1024.0));
-                                    });
-
-                                    if let Some(up) = stats.upload_throughput_mbps() {
-                                        ui.horizontal(|ui| {
-                                            ui.label("上传吞吐量:");
-                                            ui.label(format!("{:.2} MB/s", up));
-                                        });
-                                    }
-
-                                    if let Some(down) = stats.download_throughput_mbps() {
-                                        ui.horizontal(|ui| {
-                                            ui.label("下载吞吐量:");
-                                            ui.label(format!("{:.2} MB/s", down));
-                                        });
-                                    }
-                                });
                             } else {
                                 ui.label("暂无统计数据");
                             }

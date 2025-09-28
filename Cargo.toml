@@ -41,6 +41,7 @@ tokio-tungstenite = "*"
 futures-util = "0.3.31"
 rand = "0.8"
 futures = "0.3"
+num-format = "0.4"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
