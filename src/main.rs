@@ -154,6 +154,7 @@ struct ApiTestApp {
 
     select_test: Option<(usize, usize)>,
     remove_test: Option<(usize, usize)>,
+    copy_test: Option<(usize, usize)>,
 
     new_project_name: String,
     new_group_name: String,
@@ -201,6 +202,7 @@ impl Default for ApiTestApp {
             project_path: Default::default(),
             select_test: Some((0, 0)),
             remove_test: None,
+            copy_test: None,
             project: Project {
                 name: "Any".to_owned(),
                 groups: vec![{
@@ -696,6 +698,10 @@ impl ApiTestApp {
                                                             {
                                                                 self.select_test =
                                                                     Some((group_index, cfg_i));
+                                                            }
+
+                                                            if ui.button("📋").on_hover_text("复制测试").clicked() {
+                                                                self.copy_test = Some((group_index, cfg_i));
                                                             }
 
                                                             if ui.button("✏️").on_hover_text("编辑测试").clicked() {
@@ -1586,6 +1592,18 @@ impl ApiTestApp {
         if let Some((i, ii)) = self.remove_test {
             self.project.groups[i].childrent.remove(ii);
             self.remove_test = None;
+        }
+
+        // 复制test
+        if let Some((i, ii)) = self.copy_test {
+            if let Some(group) = self.project.groups.get_mut(i) {
+                if let Some(test) = group.childrent.get(ii) {
+                    let mut cloned_test = test.clone();
+                    cloned_test.name = format!("{} - Copy", test.name);
+                    group.childrent.insert(ii + 1, cloned_test);
+                }
+            }
+            self.copy_test = None;
         }
     }
 }
