@@ -3,6 +3,7 @@ use reqwest::{header::HeaderMap, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 mod util;
+pub mod script_engine;
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -205,6 +206,17 @@ pub struct HttpRequestConfig {
     pub body_raw: String,
     // 原始字符串类型
     pub body_raw_type: RequestBodyRawType,
+
+    // 脚本支持
+    /// 请求前脚本
+    #[serde(default)]
+    pub pre_request_script: String,
+    /// 响应后脚本
+    #[serde(default)]
+    pub post_response_script: String,
+    /// 是否启用脚本
+    #[serde(default)]
+    pub script_enabled: bool,
 }
 
 impl Clone for HttpRequestConfig {
@@ -219,6 +231,9 @@ impl Clone for HttpRequestConfig {
             body_form_data: self.body_form_data.clone(),
             body_raw: self.body_raw.clone(),
             body_raw_type: self.body_raw_type.clone(),
+            pre_request_script: self.pre_request_script.clone(),
+            post_response_script: self.post_response_script.clone(),
+            script_enabled: self.script_enabled,
         }
     }
 }
@@ -235,6 +250,9 @@ impl Default for HttpRequestConfig {
             header: Default::default(),
             body_form: Default::default(),
             body_form_data: Default::default(),
+            pre_request_script: String::new(),
+            post_response_script: String::new(),
+            script_enabled: false,
         }
     }
 }
@@ -443,6 +461,8 @@ pub struct HttpResponse {
     pub duration: u128,
     pub request_size: u64,
     pub response_size: u64,
+    /// 脚本修改后的环境变量
+    pub modified_vars: Option<Vec<PairUi>>,
 }
 
 impl HttpResponse {
@@ -497,6 +517,7 @@ pub enum RequestTab {
     Params,
     Headers,
     Body,
+    Scripts,
 }
 impl Default for RequestTab {
     fn default() -> Self {

@@ -44,7 +44,7 @@ const METHODS: [Method; 10] = [
     Method::PATCH,
     Method::WS,
 ];
-const REQ_TABS: [RequestTab; 3] = [RequestTab::Params, RequestTab::Headers, RequestTab::Body];
+const REQ_TABS: [RequestTab; 4] = [RequestTab::Params, RequestTab::Headers, RequestTab::Body, RequestTab::Scripts];
 const REQ_BODY_TABS: [RequestBodyTab; 3] = [
     RequestBodyTab::Raw,
     RequestBodyTab::Form,
@@ -971,6 +971,71 @@ impl ApiTestApp {
                                 }
                             }
                         }
+                        RequestTab::Scripts => {
+                            ui.vertical(|ui| {
+                                ui.checkbox(&mut http_test.request.script_enabled, "启用脚本 (Enable Scripts)");
+
+                                ui.add_space(5.0);
+                                ui.separator();
+
+                                ui.label("Pre-Request Script (请求前脚本):");
+                                ui.label("在发送请求前执行,可修改 URL、Headers、Body 等");
+                                ui.add_space(3.0);
+                                egui::ScrollArea::vertical()
+                                    .id_salt("pre_request_script_scroll")
+                                    .max_height(200.0)
+                                    .show(ui, |ui| {
+                                        ui.add(
+                                            egui::TextEdit::multiline(&mut http_test.request.pre_request_script)
+                                                .font(egui::TextStyle::Monospace)
+                                                .code_editor()
+                                                .desired_rows(10)
+                                                .desired_width(f32::INFINITY),
+                                        );
+                                    });
+
+                                ui.add_space(10.0);
+                                ui.separator();
+
+                                ui.label("Post-Response Script (响应后脚本):");
+                                ui.label("在收到响应后执行,可验证业务状态码、提取数据到变量等");
+                                ui.add_space(3.0);
+                                egui::ScrollArea::vertical()
+                                    .id_salt("post_response_script_scroll")
+                                    .max_height(200.0)
+                                    .show(ui, |ui| {
+                                        ui.add(
+                                            egui::TextEdit::multiline(&mut http_test.request.post_response_script)
+                                                .font(egui::TextStyle::Monospace)
+                                                .code_editor()
+                                                .desired_rows(10)
+                                                .desired_width(f32::INFINITY),
+                                        );
+                                    });
+
+                                ui.add_space(10.0);
+
+                                // 帮助提示
+                                ui.collapsing("📖 脚本帮助", |ui| {
+                                    ui.label("可用对象:");
+                                    ui.monospace("  request.url, request.method, request.headers, request.params, request.body");
+                                    ui.monospace("  response.status, response.headers, response.body, response.duration");
+                                    ui.monospace("  vars - 环境变量");
+
+                                    ui.add_space(5.0);
+                                    ui.label("常用函数:");
+                                    ui.monospace("  parse_json() - JSON解析");
+                                    ui.monospace("  md5(), sha256(), hmac_sha256()");
+                                    ui.monospace("  base64_encode(), base64_decode()");
+                                    ui.monospace("  timestamp(), uuid(), random_string(len)");
+
+                                    ui.add_space(5.0);
+                                    ui.label("示例 - 判断业务状态码:");
+                                    ui.code("let result = parse_json(response.body);");
+                                    ui.code("vars[\"test_result\"] = if result.code == 0 { \"PASS\" } else { \"FAIL\" };");
+                                });
+                            });
+                        }
                     };
 
                     ui.separator();
@@ -1478,6 +1543,18 @@ impl ApiTestApp {
                 http_test.stats.total_download_bytes += response.response_size;
 
                 let is_success = response.status.is_success();
+
+                // 应用脚本修改的变量到项目
+                if let Some(modified_vars) = &response.modified_vars {
+                    for var in modified_vars {
+                        if let Some(existing) = self.project.variables.iter_mut().find(|v| v.key == var.key) {
+                            existing.value = var.value.clone();
+                        } else {
+                            self.project.variables.push(var.clone());
+                        }
+                    }
+                }
+
                 http_test.response = Some(response);
                 http_test.stats.sending -= 1;
 

@@ -43,5 +43,14 @@ rand = "0.8"
 futures = "0.3"
 num-format = "0.4"
 
+# 脚本引擎
+rhai = { version = "1.19", features = ["sync", "serde"] }
+# 加密库
+md5 = "0.7"
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+hmac = "0.12"
+
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

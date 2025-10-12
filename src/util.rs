@@ -11,6 +11,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 
 use crate::{AppConfig, PairUi, Project};
+use crate::script_engine::{ScriptEngine, PreRequestContext, PostResponseContext, ScriptContext};
 
 pub fn load_app_icon() -> eframe::egui::IconData {
     let app_icon_bytes = include_bytes!("../data/icon.jpg");
@@ -218,7 +219,89 @@ pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Resul
         }
     }
 
-    let request_builder = req_cfg.request_build(vars).await?;
+    // 创建可变的请求配置副本用于脚本修改
+    let mut modified_req_cfg = req_cfg.clone();
+    let mut script_vars = vars.clone();
+
+    // 执行 Pre-Request Script
+    if req_cfg.script_enabled && !req_cfg.pre_request_script.trim().is_empty() {
+        let mut engine = ScriptEngine::new();
+
+        let context = PreRequestContext {
+            url: modified_req_cfg.url.clone(),
+            method: modified_req_cfg.method.as_ref().to_string(),
+            headers: modified_req_cfg.header.iter()
+                .filter(|kv| !kv.disable)
+                .map(|kv| (kv.key.clone(), kv.value.clone()))
+                .collect(),
+            params: modified_req_cfg.query.iter()
+                .filter(|kv| !kv.disable)
+                .map(|kv| (kv.key.clone(), kv.value.clone()))
+                .collect(),
+            body: modified_req_cfg.body_raw.clone(),
+            variables: script_vars.iter()
+                .map(|kv| (kv.key.clone(), kv.value.clone()))
+                .collect(),
+        };
+
+        match engine.execute_pre_request(&req_cfg.pre_request_script, context) {
+            Ok(result) => {
+                if result.success {
+                    // 应用脚本修改
+                    if let ScriptContext::PreRequest(ctx) = result.context {
+                        modified_req_cfg.url = ctx.url;
+                        modified_req_cfg.body_raw = ctx.body;
+
+                        // 更新 headers
+                        for (key, value) in ctx.headers {
+                            if let Some(existing) = modified_req_cfg.header.iter_mut().find(|h| h.key == key) {
+                                existing.value = value;
+                            } else {
+                                modified_req_cfg.header.push(PairUi {
+                                    key,
+                                    value,
+                                    disable: false,
+                                });
+                            }
+                        }
+
+                        // 更新 params (查询参数)
+                        for (key, value) in ctx.params {
+                            if let Some(existing) = modified_req_cfg.query.iter_mut().find(|p| p.key == key) {
+                                existing.value = value;
+                            } else {
+                                modified_req_cfg.query.push(PairUi {
+                                    key,
+                                    value,
+                                    disable: false,
+                                });
+                            }
+                        }
+
+                        // 更新变量
+                        for (key, value) in ctx.variables {
+                            if let Some(existing) = script_vars.iter_mut().find(|v| v.key == key) {
+                                existing.value = value;
+                            } else {
+                                script_vars.push(PairUi {
+                                    key,
+                                    value,
+                                    disable: false,
+                                });
+                            }
+                        }
+                    }
+                } else if let Some(err) = result.error {
+                    eprintln!("Pre-request script error: {}", err);
+                }
+            }
+            Err(e) => {
+                eprintln!("Pre-request script execution error: {}", e);
+            }
+        }
+    }
+
+    let request_builder = modified_req_cfg.request_build(&script_vars).await?;
     let start_time = std::time::Instant::now();
     let response = request_builder.send().await?;
     let duration = start_time.elapsed().as_millis();
@@ -236,6 +319,80 @@ pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Resul
         headers_str.push_str(format!("{}: {}\n", name, value).as_str());
     });
 
+    let response_body = data_vec.as_ref()
+        .and_then(|d| String::from_utf8(d.clone()).ok())
+        .unwrap_or_default();
+
+    // 执行 Post-Response Script
+    if req_cfg.script_enabled && !req_cfg.post_response_script.trim().is_empty() {
+        let mut engine = ScriptEngine::new();
+
+        let request_context = PreRequestContext {
+            url: modified_req_cfg.url.clone(),
+            method: modified_req_cfg.method.as_ref().to_string(),
+            headers: modified_req_cfg.header.iter()
+                .filter(|kv| !kv.disable)
+                .map(|kv| (kv.key.clone(), kv.value.clone()))
+                .collect(),
+            params: modified_req_cfg.query.iter()
+                .filter(|kv| !kv.disable)
+                .map(|kv| (kv.key.clone(), kv.value.clone()))
+                .collect(),
+            body: modified_req_cfg.body_raw.clone(),
+            variables: script_vars.iter()
+                .map(|kv| (kv.key.clone(), kv.value.clone()))
+                .collect(),
+        };
+
+        let context = PostResponseContext {
+            request: request_context,
+            status: status.as_u16(),
+            headers: headers.iter()
+                .map(|(name, val)| (name.as_str().to_string(), val.to_str().unwrap_or("").to_string()))
+                .collect(),
+            body: response_body.clone(),
+            duration,
+            variables: script_vars.iter()
+                .map(|kv| (kv.key.clone(), kv.value.clone()))
+                .collect(),
+        };
+
+        match engine.execute_post_response(&req_cfg.post_response_script, context) {
+            Ok(result) => {
+                if result.success {
+                    // 应用变量修改（post-response 主要用于修改变量）
+                    if let ScriptContext::PostResponse(ctx) = result.context {
+                        for (key, value) in ctx.variables {
+                            if let Some(existing) = script_vars.iter_mut().find(|v| v.key == key) {
+                                existing.value = value;
+                            } else {
+                                script_vars.push(PairUi {
+                                    key,
+                                    value,
+                                    disable: false,
+                                });
+                            }
+                        }
+                    }
+                } else if let Some(err) = result.error {
+                    eprintln!("Post-response script error: {}", err);
+                }
+            }
+            Err(e) => {
+                eprintln!("Post-response script execution error: {}", e);
+            }
+        }
+    }
+
+    // 检查变量是否被脚本修改过
+    let modified_vars = if req_cfg.script_enabled &&
+                          (!req_cfg.pre_request_script.trim().is_empty() ||
+                           !req_cfg.post_response_script.trim().is_empty()) {
+        Some(script_vars)
+    } else {
+        None
+    };
+
     Ok(HttpResponse {
         data_vec,
         headers,
@@ -247,6 +404,7 @@ pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Resul
         duration,
         request_size,
         response_size,
+        modified_vars,
     })
 }
 
