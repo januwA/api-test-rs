@@ -518,6 +518,7 @@ pub enum RequestTab {
     Headers,
     Body,
     Scripts,
+    Curl,
 }
 impl Default for RequestTab {
     fn default() -> Self {
@@ -624,9 +625,10 @@ impl Group {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     pub project_path: String,
+    pub font_size: f32,
 }
 
 impl AppConfig {

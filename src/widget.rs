@@ -110,6 +110,103 @@ where
     });
 }
 
+pub fn pair_table_with_file_picker(ui: &mut Ui, id: impl std::hash::Hash, pair_vec: &mut Vec<PairUi>) {
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            if ui.button("Add").clicked() {
+                pair_vec.push(PairUi::default());
+            }
+            ui.label(RichText::new("ℹ️ 提示：文件路径需要 @ 前缀，例如 @file.jpg；多个文件用空格分隔，例如 @a.jpg @b.jpg")
+                .color(Color32::from_rgb(100, 149, 237))
+                .italics());
+        });
+    });
+
+    ui.separator();
+
+    egui_extras::StripBuilder::new(ui)
+        .size(egui_extras::Size::remainder()
+        .at_least(50.0)
+        .at_most(120.0))
+        .vertical(|mut strip| {
+            strip.cell(|ui| {
+                egui::ScrollArea::vertical().id_salt(id).show(ui, |ui| {
+                    let table = egui_extras::TableBuilder::new(ui)
+                        .striped(true)
+                        .resizable(true)
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                        .column(egui_extras::Column::auto())
+                        .column(egui_extras::Column::initial(COLUMN_WIDTH_INITIAL).range(100.0..=400.0))
+                        .column(egui_extras::Column::initial(COLUMN_WIDTH_INITIAL).range(100.0..=400.0))
+                        .column(egui_extras::Column::initial(100.0).at_least(40.0).at_most(400.0))
+                        .min_scrolled_height(10.0);
+
+                    table
+                        .header(20.0, |mut header| {
+                            header.col(|ui| {
+                                ui.strong("");
+                            });
+                            header.col(|ui| {
+                                ui.strong("Key");
+                            });
+                            header.col(|ui| {
+                                ui.strong("Value");
+                            });
+                            header.col(|ui| {
+                                ui.strong("Actions");
+                            });
+                        })
+                        .body(|mut body| {
+                            pair_vec.retain_mut(|el| {
+                                let mut is_retain = true;
+
+                                body.row(30.0, |mut row| {
+                                    row.col(|ui| {
+                                        ui.checkbox(&mut el.disable, "");
+                                    });
+
+                                    row.col(|ui| {
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut el.key)
+                                                .desired_width(f32::INFINITY),
+                                        );
+                                    });
+
+                                    row.col(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.add(
+                                                egui::TextEdit::singleline(&mut el.value)
+                                                    .desired_width(f32::INFINITY),
+                                            );
+                                        });
+                                    });
+
+                                    row.col(|ui| {
+                                        ui.horizontal(|ui| {
+                                            if ui.button("📁").on_hover_text("选择文件").clicked() {
+                                                if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                                    let file_path = format!("@{}", path.display().to_string());
+                                                    if el.value.is_empty() {
+                                                        el.value = file_path;
+                                                    } else {
+                                                        el.value = format!("{} {}", el.value, file_path);
+                                                    }
+                                                }
+                                            }
+                                            if error_button(ui, "Del").clicked() {
+                                                is_retain = false;
+                                            }
+                                        });
+                                    });
+                                });
+                                is_retain
+                            });
+                        })
+                });
+            });
+        });
+}
+
 pub fn code_view_ui(ui: &mut egui::Ui, mut code: &str) {
     ui.add(
         egui::TextEdit::multiline(&mut code)

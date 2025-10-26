@@ -4,6 +4,7 @@ use anyhow::{bail, Result};
 use rhai::{Dynamic, Engine, Map, Scope, AST};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// 脚本执行上下文 - 请求前
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,35 +63,35 @@ pub enum ScriptContext {
 /// 脚本引擎
 pub struct ScriptEngine {
     engine: Engine,
+    script_output: Arc<Mutex<Vec<String>>>,
 }
 
 impl ScriptEngine {
-    /// 创建新的脚本引擎实例
-    pub fn new() -> Self {
+    pub fn new(script_output: Arc<Mutex<Vec<String>>>) -> Self {
         let mut engine = Engine::new();
 
         // 注册加密函数
-        Self::register_crypto_functions(&mut engine);
+        Self::register_crypto_functions(&mut engine, script_output.clone());
 
         // 注册编码函数
-        Self::register_encoding_functions(&mut engine);
+        Self::register_encoding_functions(&mut engine, script_output.clone());
 
         // 注册 JSON 函数
-        Self::register_json_functions(&mut engine);
+        Self::register_json_functions(&mut engine, script_output.clone());
 
         // 注册工具函数
-        Self::register_utility_functions(&mut engine);
+        Self::register_utility_functions(&mut engine, script_output.clone());
 
         // 注册 console_log 函数
-        Self::register_console_functions(&mut engine);
+        Self::register_console_functions(&mut engine, script_output.clone());
 
         // 注册文件操作函数
-        Self::register_file_functions(&mut engine);
+        Self::register_file_functions(&mut engine, script_output.clone());
 
         // 注册网络请求函数
-        Self::register_http_functions(&mut engine);
+        Self::register_http_functions(&mut engine, script_output.clone());
 
-        Self { engine }
+        Self { engine, script_output }
     }
 
     /// 执行请求前脚本
@@ -170,7 +171,7 @@ impl ScriptEngine {
     }
 
     // ===== 加密函数 =====
-    fn register_crypto_functions(engine: &mut Engine) {
+    fn register_crypto_functions(engine: &mut Engine, script_output: Arc<Mutex<Vec<String>>>) {
         use sha2::{Sha256, Sha512, Digest};
 
         // MD5
@@ -204,7 +205,7 @@ impl ScriptEngine {
     }
 
     // ===== 编码函数 =====
-    fn register_encoding_functions(engine: &mut Engine) {
+    fn register_encoding_functions(engine: &mut Engine, script_output: Arc<Mutex<Vec<String>>>) {
         use base64::{engine::general_purpose, Engine as _};
 
         // Base64 编码
@@ -246,7 +247,7 @@ impl ScriptEngine {
     }
 
     // ===== JSON 函数 =====
-    fn register_json_functions(engine: &mut Engine) {
+    fn register_json_functions(engine: &mut Engine, script_output: Arc<Mutex<Vec<String>>>) {
         use serde_json::Value;
 
         // 解析 JSON 字符串为 Rhai Map
@@ -276,48 +277,66 @@ impl ScriptEngine {
     }
 
     // ===== Console 函数 =====
-    fn register_console_functions(engine: &mut Engine) {
+    fn register_console_functions(engine: &mut Engine, script_output: Arc<Mutex<Vec<String>>>) {
         // console_log for String
-        engine.register_fn("console_log", |msg: &str| {
-            println!("[Script] {}", msg);
+        let script_output_clone = script_output.clone();
+        engine.register_fn("console_log", move |msg: &str| {
+            if let Ok(mut output) = script_output_clone.lock() {
+                output.push(format!("[Script] {}", msg));
+            }
         });
 
         // console_log for integers
-        engine.register_fn("console_log", |msg: i64| {
-            println!("[Script] {}", msg);
+        let script_output_clone = script_output.clone();
+        engine.register_fn("console_log", move |msg: i64| {
+            if let Ok(mut output) = script_output_clone.lock() {
+                output.push(format!("[Script] {}", msg));
+            }
         });
 
         // console_log for floats
-        engine.register_fn("console_log", |msg: f64| {
-            println!("[Script] {}", msg);
+        let script_output_clone = script_output.clone();
+        engine.register_fn("console_log", move |msg: f64| {
+            if let Ok(mut output) = script_output_clone.lock() {
+                output.push(format!("[Script] {}", msg));
+            }
         });
 
         // console_log for booleans
-        engine.register_fn("console_log", |msg: bool| {
-            println!("[Script] {}", msg);
+        let script_output_clone = script_output.clone();
+        engine.register_fn("console_log", move |msg: bool| {
+            if let Ok(mut output) = script_output_clone.lock() {
+                output.push(format!("[Script] {}", msg));
+            }
         });
 
         // console_log for Map (转为 JSON)
-        engine.register_fn("console_log", |map: Map| {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("console_log", move |map: Map| {
             let json_value = Self::map_to_json_value(&map);
-            println!("[Script] {}", serde_json::to_string_pretty(&json_value).unwrap_or_default());
+            if let Ok(mut output) = script_output_clone.lock() {
+                output.push(format!("[Script] {}", serde_json::to_string_pretty(&json_value).unwrap_or_default()));
+            }
         });
 
         // console_log for Dynamic (通用)
-        engine.register_fn("console_log", |value: Dynamic| {
-            if let Ok(s) = value.clone().into_string() {
-                println!("[Script] {}", s);
-            } else if let Some(map) = value.clone().try_cast::<Map>() {
-                let json_value = Self::map_to_json_value(&map);
-                println!("[Script] {}", serde_json::to_string_pretty(&json_value).unwrap_or_default());
-            } else {
-                println!("[Script] {:?}", value);
+        let script_output_clone = script_output.clone();
+        engine.register_fn("console_log", move |value: Dynamic| {
+            if let Ok(mut output) = script_output_clone.lock() {
+                if let Ok(s) = value.clone().into_string() {
+                    output.push(format!("[Script] {}", s));
+                } else if let Some(map) = value.clone().try_cast::<Map>() {
+                    let json_value = Self::map_to_json_value(&map);
+                    output.push(format!("[Script] {}", serde_json::to_string_pretty(&json_value).unwrap_or_default()));
+                } else {
+                    output.push(format!("[Script] {:?}", value));
+                }
             }
         });
     }
 
     // ===== 工具函数 =====
-    fn register_utility_functions(engine: &mut Engine) {
+    fn register_utility_functions(engine: &mut Engine, script_output: Arc<Mutex<Vec<String>>>) {
         // 生成随机数
         engine.register_fn("random", || -> i64 {
             use rand::Rng;
@@ -369,21 +388,27 @@ impl ScriptEngine {
     }
 
     // ===== 文件操作函数 =====
-    fn register_file_functions(engine: &mut Engine) {
+    fn register_file_functions(engine: &mut Engine, script_output: Arc<Mutex<Vec<String>>>) {
         // 读取文件内容
-        engine.register_fn("read_file", |path: &str| -> String {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("read_file", move |path: &str| -> String {
             std::fs::read_to_string(path).unwrap_or_else(|e| {
-                eprintln!("[Script] 读取文件失败 {}: {}", path, e);
+                if let Ok(mut output) = script_output_clone.lock() {
+                    output.push(format!("[Script] 读取文件失败 {}: {}", path, e));
+                }
                 String::new()
             })
         });
 
         // 写入文件（覆盖）
-        engine.register_fn("write_file", |path: &str, content: &str| -> bool {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("write_file", move |path: &str, content: &str| -> bool {
             // 确保父目录存在
             if let Some(parent) = std::path::Path::new(path).parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    eprintln!("[Script] 创建目录失败 {}: {}", parent.display(), e);
+                    if let Ok(mut output) = script_output_clone.lock() {
+                        output.push(format!("[Script] 创建目录失败 {}: {}", parent.display(), e));
+                    }
                     return false;
                 }
             }
@@ -391,20 +416,25 @@ impl ScriptEngine {
             match std::fs::write(path, content) {
                 Ok(_) => true,
                 Err(e) => {
-                    eprintln!("[Script] 写入文件失败 {}: {}", path, e);
+                    if let Ok(mut output) = script_output_clone.lock() {
+                        output.push(format!("[Script] 写入文件失败 {}: {}", path, e));
+                    }
                     false
                 }
             }
         });
 
         // 追加到文件
-        engine.register_fn("append_file", |path: &str, content: &str| -> bool {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("append_file", move |path: &str, content: &str| -> bool {
             use std::io::Write;
 
             // 确保父目录存在
             if let Some(parent) = std::path::Path::new(path).parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    eprintln!("[Script] 创建目录失败 {}: {}", parent.display(), e);
+                    if let Ok(mut output) = script_output_clone.lock() {
+                        output.push(format!("[Script] 创建目录失败 {}: {}", parent.display(), e));
+                    }
                     return false;
                 }
             }
@@ -417,12 +447,16 @@ impl ScriptEngine {
                 Ok(mut file) => match file.write_all(content.as_bytes()) {
                     Ok(_) => true,
                     Err(e) => {
-                        eprintln!("[Script] 追加文件失败 {}: {}", path, e);
+                        if let Ok(mut output) = script_output_clone.lock() {
+                            output.push(format!("[Script] 追加文件失败 {}: {}", path, e));
+                        }
                         false
                     }
                 },
                 Err(e) => {
-                    eprintln!("[Script] 打开文件失败 {}: {}", path, e);
+                    if let Ok(mut output) = script_output_clone.lock() {
+                        output.push(format!("[Script] 打开文件失败 {}: {}", path, e));
+                    }
                     false
                 }
             }
@@ -434,37 +468,46 @@ impl ScriptEngine {
         });
 
         // 删除文件
-        engine.register_fn("delete_file", |path: &str| -> bool {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("delete_file", move |path: &str| -> bool {
             match std::fs::remove_file(path) {
                 Ok(_) => true,
                 Err(e) => {
-                    eprintln!("[Script] 删除文件失败 {}: {}", path, e);
+                    if let Ok(mut output) = script_output_clone.lock() {
+                        output.push(format!("[Script] 删除文件失败 {}: {}", path, e));
+                    }
                     false
                 }
             }
         });
 
         // 读取文件为字节数组（返回 base64 编码的字符串）
-        engine.register_fn("read_file_bytes", |path: &str| -> String {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("read_file_bytes", move |path: &str| -> String {
             use base64::{engine::general_purpose, Engine as _};
 
             match std::fs::read(path) {
                 Ok(bytes) => general_purpose::STANDARD.encode(&bytes),
                 Err(e) => {
-                    eprintln!("[Script] 读取文件失败 {}: {}", path, e);
+                    if let Ok(mut output) = script_output_clone.lock() {
+                        output.push(format!("[Script] 读取文件失败 {}: {}", path, e));
+                    }
                     String::new()
                 }
             }
         });
 
         // 写入字节数组（从 base64 编码的字符串）
-        engine.register_fn("write_file_bytes", |path: &str, base64_content: &str| -> bool {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("write_file_bytes", move |path: &str, base64_content: &str| -> bool {
             use base64::{engine::general_purpose, Engine as _};
 
             // 确保父目录存在
             if let Some(parent) = std::path::Path::new(path).parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    eprintln!("[Script] 创建目录失败 {}: {}", parent.display(), e);
+                    if let Ok(mut output) = script_output_clone.lock() {
+                        output.push(format!("[Script] 创建目录失败 {}: {}", parent.display(), e));
+                    }
                     return false;
                 }
             }
@@ -473,30 +516,38 @@ impl ScriptEngine {
                 Ok(bytes) => match std::fs::write(path, bytes) {
                     Ok(_) => true,
                     Err(e) => {
-                        eprintln!("[Script] 写入文件失败 {}: {}", path, e);
+                        if let Ok(mut output) = script_output_clone.lock() {
+                            output.push(format!("[Script] 写入文件失败 {}: {}", path, e));
+                        }
                         false
                     }
                 },
                 Err(e) => {
-                    eprintln!("[Script] Base64解码失败: {}", e);
+                    if let Ok(mut output) = script_output_clone.lock() {
+                        output.push(format!("[Script] Base64解码失败: {}", e));
+                    }
                     false
                 }
             }
         });
 
         // 创建目录
-        engine.register_fn("create_dir", |path: &str| -> bool {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("create_dir", move |path: &str| -> bool {
             match std::fs::create_dir_all(path) {
                 Ok(_) => true,
                 Err(e) => {
-                    eprintln!("[Script] 创建目录失败 {}: {}", path, e);
+                    if let Ok(mut output) = script_output_clone.lock() {
+                        output.push(format!("[Script] 创建目录失败 {}: {}", path, e));
+                    }
                     false
                 }
             }
         });
 
         // 列出目录中的文件
-        engine.register_fn("list_files", |path: &str| -> Vec<Dynamic> {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("list_files", move |path: &str| -> Vec<Dynamic> {
             match std::fs::read_dir(path) {
                 Ok(entries) => {
                     entries
@@ -508,7 +559,9 @@ impl ScriptEngine {
                         .collect()
                 },
                 Err(e) => {
-                    eprintln!("[Script] 读取目录失败 {}: {}", path, e);
+                    if let Ok(mut output) = script_output_clone.lock() {
+                        output.push(format!("[Script] 读取目录失败 {}: {}", path, e));
+                    }
                     Vec::new()
                 }
             }
@@ -516,9 +569,10 @@ impl ScriptEngine {
     }
 
     // ===== HTTP 网络请求函数 =====
-    fn register_http_functions(engine: &mut Engine) {
+    fn register_http_functions(engine: &mut Engine, script_output: Arc<Mutex<Vec<String>>>) {
         // HTTP GET 请求（文本）
-        engine.register_fn("http_get", |url: &str| -> String {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("http_get", move |url: &str| -> String {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 match reqwest::get(url).await {
@@ -526,13 +580,17 @@ impl ScriptEngine {
                         match response.text().await {
                             Ok(text) => text,
                             Err(e) => {
-                                eprintln!("[Script] 读取响应失败: {}", e);
+                                if let Ok(mut output) = script_output_clone.lock() {
+                                    output.push(format!("[Script] 读取响应失败: {}", e));
+                                }
                                 String::new()
                             }
                         }
                     },
                     Err(e) => {
-                        eprintln!("[Script] HTTP GET 请求失败 {}: {}", url, e);
+                        if let Ok(mut output) = script_output_clone.lock() {
+                            output.push(format!("[Script] HTTP GET 请求失败 {}: {}", url, e));
+                        }
                         String::new()
                     }
                 }
@@ -540,7 +598,8 @@ impl ScriptEngine {
         });
 
         // HTTP GET 请求（二进制，返回 Base64）
-        engine.register_fn("http_get_bytes", |url: &str| -> String {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("http_get_bytes", move |url: &str| -> String {
             use base64::{engine::general_purpose, Engine as _};
 
             let rt = tokio::runtime::Runtime::new().unwrap();
@@ -550,13 +609,17 @@ impl ScriptEngine {
                         match response.bytes().await {
                             Ok(bytes) => general_purpose::STANDARD.encode(&bytes),
                             Err(e) => {
-                                eprintln!("[Script] 读取响应失败: {}", e);
+                                if let Ok(mut output) = script_output_clone.lock() {
+                                    output.push(format!("[Script] 读取响应失败: {}", e));
+                                }
                                 String::new()
                             }
                         }
                     },
                     Err(e) => {
-                        eprintln!("[Script] HTTP GET 请求失败 {}: {}", url, e);
+                        if let Ok(mut output) = script_output_clone.lock() {
+                            output.push(format!("[Script] HTTP GET 请求失败 {}: {}", url, e));
+                        }
                         String::new()
                     }
                 }
@@ -564,7 +627,8 @@ impl ScriptEngine {
         });
 
         // HTTP POST 请求（带 JSON body）
-        engine.register_fn("http_post", |url: &str, body: &str| -> String {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("http_post", move |url: &str, body: &str| -> String {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let client = reqwest::Client::new();
@@ -578,13 +642,17 @@ impl ScriptEngine {
                         match response.text().await {
                             Ok(text) => text,
                             Err(e) => {
-                                eprintln!("[Script] 读取响应失败: {}", e);
+                                if let Ok(mut output) = script_output_clone.lock() {
+                                    output.push(format!("[Script] 读取响应失败: {}", e));
+                                }
                                 String::new()
                             }
                         }
                     },
                     Err(e) => {
-                        eprintln!("[Script] HTTP POST 请求失败 {}: {}", url, e);
+                        if let Ok(mut output) = script_output_clone.lock() {
+                            output.push(format!("[Script] HTTP POST 请求失败 {}: {}", url, e));
+                        }
                         String::new()
                     }
                 }
@@ -592,7 +660,8 @@ impl ScriptEngine {
         });
 
         // HTTP 请求（完整版，返回响应对象）
-        engine.register_fn("http_request", |url: &str, method: &str, body: &str, headers: Map| -> Map {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("http_request", move |url: &str, method: &str, body: &str, headers: Map| -> Map {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let client = reqwest::Client::new();
@@ -642,7 +711,9 @@ impl ScriptEngine {
                         result
                     },
                     Err(e) => {
-                        eprintln!("[Script] HTTP 请求失败 {}: {}", url, e);
+                        if let Ok(mut output) = script_output_clone.lock() {
+                            output.push(format!("[Script] HTTP 请求失败 {}: {}", url, e));
+                        }
                         let mut result = Map::new();
                         result.insert("status".into(), Dynamic::from(0_i64));
                         result.insert("headers".into(), Dynamic::from(Map::new()));
@@ -655,7 +726,8 @@ impl ScriptEngine {
         });
 
         // 简化的 HTTP 请求（仅 URL 和 method）
-        engine.register_fn("http_request", |url: &str, method: &str| -> Map {
+        let script_output_clone = script_output.clone();
+        engine.register_fn("http_request", move |url: &str, method: &str| -> Map {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let client = reqwest::Client::new();
@@ -680,7 +752,9 @@ impl ScriptEngine {
                         result
                     },
                     Err(e) => {
-                        eprintln!("[Script] HTTP 请求失败 {}: {}", url, e);
+                        if let Ok(mut output) = script_output_clone.lock() {
+                            output.push(format!("[Script] HTTP 请求失败 {}: {}", url, e));
+                        }
                         let mut result = Map::new();
                         result.insert("status".into(), Dynamic::from(0_i64));
                         result.insert("body".into(), Dynamic::from(String::new()));

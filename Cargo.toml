@@ -42,6 +42,7 @@ futures-util = "0.3.31"
 rand = "0.8"
 futures = "0.3"
 num-format = "0.4"
+rfd = "0.14"
 
 # 脚本引擎
 rhai = { version = "1.19", features = ["sync", "serde"] }

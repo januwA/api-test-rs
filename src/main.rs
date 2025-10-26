@@ -3,15 +3,15 @@
 
 use anyhow::Result;
 use core::f32;
-use std::time::Duration;
-use futures_util::{SinkExt, StreamExt};
-use std::collections::BTreeMap;
 use futures::stream::{FuturesUnordered, StreamExt as FuturesStreamExt};
-use std::io::Read;
+use futures_util::{SinkExt, StreamExt};
 use num_format::{Locale, ToFormattedString};
+use std::collections::BTreeMap;
+use std::io::Read;
 use std::ops::Index;
 use std::sync::Arc;
 use std::thread; // Add this line
+use std::time::Duration;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::{http, Message};
 use tokio_tungstenite::{connect_async, tungstenite};
@@ -24,7 +24,7 @@ use eframe::egui::{CollapsingHeader, FontFamily, FontId, TextEdit, TextStyle, Th
 use eframe::epaint::{vec2, Color32};
 use image::{open, EncodableLayout};
 use tokio::runtime::Runtime;
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{mpsc, watch};
 use widget::error_button;
 
 mod util;
@@ -44,7 +44,13 @@ const METHODS: [Method; 10] = [
     Method::PATCH,
     Method::WS,
 ];
-const REQ_TABS: [RequestTab; 4] = [RequestTab::Params, RequestTab::Headers, RequestTab::Body, RequestTab::Scripts];
+const REQ_TABS: [RequestTab; 5] = [
+    RequestTab::Params,
+    RequestTab::Headers,
+    RequestTab::Body,
+    RequestTab::Scripts,
+    RequestTab::Curl,
+];
 const REQ_BODY_TABS: [RequestBodyTab; 3] = [
     RequestBodyTab::Raw,
     RequestBodyTab::Form,
@@ -60,7 +66,8 @@ const REQ_BODY_RAW_TYPES: [RequestBodyRawType; 5] = [
 const WS_BODY_RAW_TYPES: [RequestBodyRawType; 2] =
     [RequestBodyRawType::Text, RequestBodyRawType::BinaryFile];
 const COLUMN_WIDTH_INITIAL: f32 = 200.0;
-const RESPONSE_TABS: [ResponseTab; 3] = [ResponseTab::Data, ResponseTab::Header, ResponseTab::Stats];
+const RESPONSE_TABS: [ResponseTab; 3] =
+    [ResponseTab::Data, ResponseTab::Header, ResponseTab::Stats];
 /* #endregion */
 
 fn main() -> eframe::Result {
@@ -73,9 +80,8 @@ fn main() -> eframe::Result {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([900.0, 600.0])
             .with_icon(util::load_app_icon())
-            .with_maximized(false),
+            .with_visible(false), // 初始隐藏窗口，避免闪烁
         ..Default::default()
     };
 
@@ -173,6 +179,9 @@ struct ApiTestApp {
     pub modal: ModalOptions,
     worker_thread_count: usize,
     search_filter: String,
+    font_size: f32,
+    script_output: Arc<std::sync::Mutex<Vec<String>>>,
+    should_minimize: bool, // 用于在第一帧最小化窗口
 }
 
 impl Default for ApiTestApp {
@@ -221,6 +230,9 @@ impl Default for ApiTestApp {
             ws_messages: Default::default(),
             worker_thread_count: num_worker_threads,
             search_filter: String::new(),
+            font_size: 16.0,
+            script_output: Arc::new(std::sync::Mutex::new(Vec::new())),
+            should_minimize: true,
         }
     }
 }
@@ -229,12 +241,15 @@ impl ApiTestApp {
     fn new(cc: &eframe::CreationContext<'_>, config: Option<AppConfig>) -> Self {
         setup_custom_style(&cc.egui_ctx);
         // configure_text_styles(&cc.egui_ctx);
-        util::setup_custom_fonts(&cc.egui_ctx);
+
+        let font_size = config.as_ref().map(|c| c.font_size).unwrap_or(16.0);
+        util::setup_custom_fonts(&cc.egui_ctx, font_size);
 
         let mut my = Self::default();
 
         if let Some(config) = config {
             my.project_path = config.project_path;
+            my.font_size = config.font_size;
             my.load_project();
             my.select_test = None;
         }
@@ -246,7 +261,7 @@ impl ApiTestApp {
         my.rt.spawn(async move {
             let ws_msgs_c = ws_msgs.clone();
             let mut _tx: Option<tokio::sync::mpsc::Sender<WsMessage>> = None;
-            let mut need_init = Arc::new(Mutex::new(true));
+            let mut need_init = Arc::new(tokio::sync::Mutex::new(true));
             let mut need_init_c = need_init.clone();
 
             while let Some(msg) = ws_rx.recv().await {
@@ -394,7 +409,7 @@ impl ApiTestApp {
 
     /// 保存当前正在操作的项目
     fn save_current_project(&mut self) {
-        self.action_status = match util::save_project(SAVE_DIR, &self.project) {
+        self.action_status = match util::save_project(SAVE_DIR, &self.project, self.font_size) {
             Ok(_) => "save sucsess".to_owned(),
             Err(err) => err.to_string(),
         };
@@ -501,8 +516,9 @@ impl ApiTestApp {
                         global_theme_preference_buttons(ui);
                     });
                 });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui|
-                    {ui.label(format!("Worker Threads: {}", self.worker_thread_count));});
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(format!("Worker Threads: {}", self.worker_thread_count));
+                });
             });
         });
     }
@@ -539,9 +555,26 @@ impl ApiTestApp {
                 });
                 ui.separator();
 
+                // 字体大小调节
+                ui.horizontal(|ui| {
+                    ui.label("🔤 字体大小:");
+                    let mut changed = false;
+                    if ui
+                        .add(egui::Slider::new(&mut self.font_size, 10.0..=24.0).step_by(1.0))
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                    if changed {
+                        util::setup_custom_fonts(ctx, self.font_size);
+                    }
+                });
+                ui.separator();
+
                 egui::ScrollArea::both().show(ui, |ui| {
                     let var_count = self.project.variables.len();
                     CollapsingHeader::new(format!("Variables ({})", var_count))
+                        .id_source("variables_section")
                         .default_open(false)
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -549,7 +582,11 @@ impl ApiTestApp {
                                     self.project.variables.push(PairUi::default());
                                 }
                                 if var_count > 0 {
-                                    if ui.button("🗑️ Clear All").on_hover_text("清除所有变量").clicked() {
+                                    if ui
+                                        .button("Clear All")
+                                        .on_hover_text("清除所有变量")
+                                        .clicked()
+                                    {
                                         self.project.variables.clear();
                                     }
                                 }
@@ -620,7 +657,7 @@ impl ApiTestApp {
 
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
-                            ui.label("➕");
+                            ui.label("Add");
                             let input_add = ui.add(
                                 egui::TextEdit::singleline(&mut self.new_group_name)
                                     .hint_text("输入组名并按回车添加...")
@@ -632,7 +669,8 @@ impl ApiTestApp {
                                 && !self.new_group_name.is_empty()
                             {
                                 let name = self.new_group_name.to_owned();
-                                let name_exists = self.project.groups.iter().any(|el| el.name == name);
+                                let name_exists =
+                                    self.project.groups.iter().any(|el| el.name == name);
                                 if !name_exists {
                                     self.project.groups.push(Group::from_name(name));
                                     self.new_group_name.clear();
@@ -655,19 +693,27 @@ impl ApiTestApp {
                             let test_count = group.childrent.len();
 
                             let group_matches = group.name.to_lowercase().contains(&search_lower);
-                            let test_matches: Vec<usize> = group.childrent.iter().enumerate()
-                                .filter(|(_, test)| test.name.to_lowercase().contains(&search_lower))
+                            let test_matches: Vec<usize> = group
+                                .childrent
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, test)| {
+                                    test.name.to_lowercase().contains(&search_lower)
+                                })
                                 .map(|(i, _)| i)
                                 .collect();
 
-                            let should_show = self.search_filter.is_empty() || group_matches || !test_matches.is_empty();
+                            let should_show = self.search_filter.is_empty()
+                                || group_matches
+                                || !test_matches.is_empty();
 
                             if should_show {
                                 CollapsingHeader::new(format!("{} ({})", group.name, test_count))
                                     .default_open(!self.search_filter.is_empty())
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
-                                            if ui.button("⚙️").on_hover_text("编辑组").clicked() {
+                                            if ui.button("Edit").on_hover_text("编辑组").clicked()
+                                            {
                                                 self.modal.open = true;
                                                 self.modal.title = "Group Edit".to_owned();
                                                 self.select_test = Some((group_index, 0));
@@ -679,47 +725,62 @@ impl ApiTestApp {
                                             egui::Layout::top_down_justified(egui::Align::Min),
                                             |ui| {
                                                 group.childrent.iter_mut().enumerate().for_each(
-                                                |(cfg_i, cfg)| {
-                                                    let test_match = self.search_filter.is_empty() ||
-                                                        cfg.name.to_lowercase().contains(&search_lower);
+                                                    |(cfg_i, cfg)| {
+                                                        let test_match =
+                                                            self.search_filter.is_empty()
+                                                                || cfg
+                                                                    .name
+                                                                    .to_lowercase()
+                                                                    .contains(&search_lower);
 
-                                                    if test_match {
-                                                        let checked = match self.select_test {
-                                                            Some((i, j)) => {
-                                                                i == group_index && j == cfg_i
-                                                            }
-                                                            _ => false,
-                                                        };
+                                                        if test_match {
+                                                            let checked = match self.select_test {
+                                                                Some((i, j)) => {
+                                                                    i == group_index && j == cfg_i
+                                                                }
+                                                                _ => false,
+                                                            };
 
-                                                        ui.horizontal(|ui| {
-                                                            if ui
-                                                                .selectable_label(checked, &cfg.name)
-                                                                .clicked()
-                                                            {
-                                                                self.select_test =
-                                                                    Some((group_index, cfg_i));
-                                                            }
+                                                            ui.horizontal(|ui| {
+                                                                if ui
+                                                                    .selectable_label(
+                                                                        checked, &cfg.name,
+                                                                    )
+                                                                    .clicked()
+                                                                {
+                                                                    self.select_test =
+                                                                        Some((group_index, cfg_i));
+                                                                }
 
-                                                            if ui.button("📋").on_hover_text("复制测试").clicked() {
-                                                                self.copy_test = Some((group_index, cfg_i));
-                                                            }
+                                                                if ui
+                                                                    .button("Copy")
+                                                                    .on_hover_text("Copy this test")
+                                                                    .clicked()
+                                                                {
+                                                                    self.copy_test =
+                                                                        Some((group_index, cfg_i));
+                                                                }
 
-                                                            if ui.button("✏️").on_hover_text("编辑测试").clicked() {
-                                                                self.modal.open = true;
-                                                                self.modal.title =
-                                                                    "Test Edit".to_owned();
-                                                                self.select_test =
-                                                                    Some((group_index, cfg_i));
-                                                                self.modal.r#type =
-                                                                    ModalType::HandleTest;
-                                                            }
-                                                        });
-                                                    }
-                                                },
-                                            );
-                                        },
-                                    );
-                                });
+                                                                if ui
+                                                                    .button("Edit")
+                                                                    .on_hover_text("Edit this test")
+                                                                    .clicked()
+                                                                {
+                                                                    self.modal.open = true;
+                                                                    self.modal.title =
+                                                                        "Test Edit".to_owned();
+                                                                    self.select_test =
+                                                                        Some((group_index, cfg_i));
+                                                                    self.modal.r#type =
+                                                                        ModalType::HandleTest;
+                                                                }
+                                                            });
+                                                        }
+                                                    },
+                                                );
+                                            },
+                                        );
+                                    });
                             }
                         });
                 });
@@ -829,9 +890,10 @@ impl ApiTestApp {
                                 let tx = self.http_tx.clone();
                                 let ctx_clone = ctx.clone();
                                 let send_count = http_test.send_count;
+                                let script_output = self.script_output.clone();
 
                                 self.rt.spawn(async move {
-                                    Self::send_http_batch(cfg, variables, tx, ctx_clone, send_count).await;
+                                    Self::send_http_batch(cfg, variables, tx, ctx_clone, send_count, script_output).await;
                                 });
                             }
                         }
@@ -942,13 +1004,14 @@ impl ApiTestApp {
 
                                         egui::ScrollArea::both()
                                             .id_salt("row data scroll")
-                                            .max_height(120.0)
+                                            .auto_shrink([false, false])
                                             .show(ui, |ui| {
-                                                ui.add(
+                                                ui.add_sized(
+                                                    [ui.available_width(), 200.0],
                                                     egui::TextEdit::multiline(
                                                         &mut http_test.request.body_raw,
                                                     )
-                                                    .desired_rows(6),
+                                                    .desired_width(f32::INFINITY),
                                                 );
                                             });
                                     });
@@ -969,7 +1032,7 @@ impl ApiTestApp {
                                     if http_test.request.method == Method::WS {
                                         return;
                                     }
-                                    widget::pair_table(
+                                    widget::pair_table_with_file_picker(
                                         ui,
                                         "body_form scroll",
                                         &mut http_test.request.body_form_data,
@@ -1040,6 +1103,77 @@ impl ApiTestApp {
                                     ui.code("let result = parse_json(response.body);");
                                     ui.code("vars[\"test_result\"] = if result.code == 0 { \"PASS\" } else { \"FAIL\" };");
                                 });
+
+                                ui.add_space(10.0);
+                                ui.separator();
+
+                                // 脚本输出控制台
+                                ui.collapsing("📋 Script Console Output", |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label("脚本执行日志:");
+                                        if ui.button("🗑️ 清空").clicked() {
+                                            if let Ok(mut output) = self.script_output.lock() {
+                                                output.clear();
+                                            }
+                                        }
+                                    });
+
+                                    ui.add_space(5.0);
+
+                                    egui::ScrollArea::vertical()
+                                        .id_salt("script_console_output")
+                                        .max_height(150.0)
+                                        .auto_shrink([false, true])
+                                        .stick_to_bottom(true)
+                                        .show(ui, |ui| {
+                                            if let Ok(output) = self.script_output.lock() {
+                                                if output.is_empty() {
+                                                    ui.label(egui::RichText::new("(无输出)").italics().weak());
+                                                } else {
+                                                    for line in output.iter() {
+                                                        ui.monospace(line);
+                                                    }
+                                                }
+                                            } else {
+                                                ui.label(egui::RichText::new("(无法读取输出)").color(egui::Color32::RED));
+                                            }
+                                        });
+                                });
+                            });
+                        }
+                        RequestTab::Curl => {
+                            ui.vertical(|ui| {
+                                ui.label("当前请求的 cURL 命令:");
+                                ui.add_space(5.0);
+
+                                // 生成 curl 命令
+                                let curl_command = util::to_curl_command(
+                                    &http_test.request,
+                                    &self.project.variables
+                                );
+
+                                egui::ScrollArea::vertical()
+                                    .id_salt("curl_command_scroll")
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.add(
+                                                egui::TextEdit::multiline(&mut curl_command.as_str())
+                                                    .font(egui::TextStyle::Monospace)
+                                                    .code_editor()
+                                                    .desired_width(f32::INFINITY)
+                                            );
+                                        });
+                                    });
+
+                                ui.add_space(10.0);
+                                ui.horizontal(|ui| {
+                                    if ui.button("Copy to Clipboard").clicked() {
+                                        ui.output_mut(|o| o.copied_text = curl_command.clone());
+                                    }
+                                    ui.label(egui::RichText::new("提示: 可以直接在终端中执行此命令")
+                                        .italics()
+                                        .weak());
+                                });
                             });
                         }
                     };
@@ -1101,7 +1235,7 @@ impl ApiTestApp {
                     // 请求返回状态
                     ui.horizontal(|ui| {
                         ui.heading(format!(
-                            "Response Status: {:?} {}  {}ms",
+                            "{:?} {}  {}ms",
                             response.version, response.status, response.duration
                         ));
 
@@ -1196,7 +1330,30 @@ impl ApiTestApp {
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     ui.vertical(|ui| {
-                                        widget::code_view_ui(ui, &response.headers_str);
+                                        // Request Headers
+                                        ui.group(|ui| {
+                                            ui.heading("📤 Request Headers");
+                                            ui.separator();
+
+                                            if http_test.request.header.is_empty() {
+                                                ui.label(egui::RichText::new("(无请求头)").italics().weak());
+                                            } else {
+                                                for pair in &http_test.request.header {
+                                                    if !pair.disable {
+                                                        ui.monospace(format!("{}: {}", pair.key, pair.value));
+                                                    }
+                                                }
+                                            }
+                                        });
+
+                                        ui.add_space(10.0);
+
+                                        // Response Headers
+                                        ui.group(|ui| {
+                                            ui.heading("📥 Response Headers");
+                                            ui.separator();
+                                            widget::code_view_ui(ui, &response.headers_str);
+                                        });
                                     });
                                 });
                         }
@@ -1460,7 +1617,8 @@ impl ApiTestApp {
         variables: Arc<Vec<PairUi>>,
         tx: tokio::sync::mpsc::Sender<Result<HttpResponse>>,
         ctx_clone: egui::Context,
-        send_count: usize
+        send_count: usize,
+        script_output: Arc<std::sync::Mutex<Vec<String>>>,
     ) {
         let max_concurrent = 10000;
         let mut futures = FuturesUnordered::new();
@@ -1471,21 +1629,25 @@ impl ApiTestApp {
                 let req_cfg = cfg.clone();
                 let vars = variables.clone();
                 let tx = tx.clone();
+                let script_output_clone = script_output.clone();
 
                 futures.push(async move {
-                    let result = util::http_send(&*req_cfg, &*vars).await;
+                    let result = util::http_send(&*req_cfg, &*vars, script_output_clone).await;
                     let _ = tx.send(result).await;
                 });
                 sent += 1;
             }
 
-            if futures.next().await.is_some() {
-            }
+            if futures.next().await.is_some() {}
         }
         ctx_clone.request_repaint();
     }
 
-    fn process_response_data(is_pretty: bool, ctx: &egui::Context, response: &HttpResponse) -> (Option<String>, bool) {
+    fn process_response_data(
+        is_pretty: bool,
+        ctx: &egui::Context,
+        response: &HttpResponse,
+    ) -> (Option<String>, bool) {
         let Some(data_vec) = &response.data_vec else {
             return (None, false);
         };
@@ -1553,7 +1715,9 @@ impl ApiTestApp {
                 // 应用脚本修改的变量到项目
                 if let Some(modified_vars) = &response.modified_vars {
                     for var in modified_vars {
-                        if let Some(existing) = self.project.variables.iter_mut().find(|v| v.key == var.key) {
+                        if let Some(existing) =
+                            self.project.variables.iter_mut().find(|v| v.key == var.key)
+                        {
                             existing.value = var.value.clone();
                         } else {
                             self.project.variables.push(var.clone());
@@ -1570,9 +1734,10 @@ impl ApiTestApp {
                     http_test.stats.failed += 1;
                 }
             }
-            Err(_) => {
+            Err(err) => {
                 http_test.stats.sending -= 1;
                 http_test.stats.failed += 1;
+                self.action_status = format!("请求失败: {}", err);
             }
         }
 
@@ -1615,6 +1780,18 @@ impl eframe::App for ApiTestApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 第一帧时最小化窗口
+        if self.should_minimize {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            self.should_minimize = false;
+        }
+
+        // 监听 Ctrl+S 快捷键保存项目
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::S)) {
+            self.save_current_project();
+            self.action_status = "已保存 (Ctrl+S)".to_owned();
+        }
+
         self.process_http_responses(ctx);
         self.cleanup_ui_state();
         self.ui_modal(ctx);

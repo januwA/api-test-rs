@@ -1,6 +1,7 @@
 #![allow(warnings, unused)]
 
 use std::{ffi::OsStr, path::Path};
+use std::sync::{Arc, Mutex};
 
 use crate::{HttpRequestConfig, HttpResponse};
 use anyhow::{bail, Result};
@@ -25,11 +26,11 @@ pub fn load_app_icon() -> eframe::egui::IconData {
     }
 }
 
-pub fn setup_custom_fonts(ctx: &egui::Context) {
+pub fn setup_custom_fonts(ctx: &egui::Context, font_size: f32) {
     // 从默认字体开始（我们将添加而不是替换它们）
     let mut fonts = egui::FontDefinitions::default();
 
-    // load system font
+    // load system font (中文字体)
     let Ok(font) = std::fs::read(
         // r#"c:/Windows/Fonts/consola.ttf"#
         r#"c:/Windows/Fonts/msyhl.ttc"#,
@@ -42,6 +43,14 @@ pub fn setup_custom_fonts(ctx: &egui::Context) {
         egui::FontData::from_owned(font).into(),
     );
 
+    // load emoji font (Emoji 字体)
+    if let Ok(emoji_font) = std::fs::read(r#"c:/Windows/Fonts/seguiemj.ttf"#) {
+        fonts.font_data.insert(
+            "emoji_font".to_owned(),
+            egui::FontData::from_owned(emoji_font).into(),
+        );
+    }
+
     // 安装我的字体
     // fonts.font_data.insert(
     //     "my_font".to_owned(),
@@ -50,12 +59,18 @@ pub fn setup_custom_fonts(ctx: &egui::Context) {
     //     )),
     // );
 
-    // 对于比例文本，将我的字体放在第一位（最高优先级）
+    // 对于比例文本，将我的字体放在第一位（最高优先级），emoji 作为 fallback
     fonts
         .families
         .entry(egui::FontFamily::Proportional)
         .or_default()
         .insert(0, "my_font".to_owned());
+
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .push("emoji_font".to_owned());
 
     // Put my font as last fallback for monospace:
     fonts
@@ -64,13 +79,32 @@ pub fn setup_custom_fonts(ctx: &egui::Context) {
         .or_default()
         .push("my_font".to_owned());
 
+    // 为 Monospace 也添加 emoji 支持
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .push("emoji_font".to_owned());
+
     // 告诉 egui 使用这些字体
     ctx.set_fonts(fonts);
+
+    // 应用字体大小
+    let mut style = (*ctx.style()).clone();
+    style.text_styles = [
+        (egui::TextStyle::Small, egui::FontId::new(font_size * 0.8, egui::FontFamily::Proportional)),
+        (egui::TextStyle::Body, egui::FontId::new(font_size, egui::FontFamily::Proportional)),
+        (egui::TextStyle::Button, egui::FontId::new(font_size, egui::FontFamily::Proportional)),
+        (egui::TextStyle::Heading, egui::FontId::new(font_size * 1.2, egui::FontFamily::Proportional)),
+        (egui::TextStyle::Monospace, egui::FontId::new(font_size, egui::FontFamily::Monospace)),
+    ]
+    .into();
+    ctx.set_style(style);
 }
 
 pub fn get_filename<S: AsRef<OsStr> + ?Sized>(path: &S) -> Result<String> {
     Ok(std::path::Path::new(path)
-        .file_stem()
+        .file_name()  // 改用 file_name() 以保留扩展名
         .ok_or_else(|| "获取文件名失败")
         .map_err(anyhow::Error::msg)?
         .to_str()
@@ -190,7 +224,7 @@ pub fn real_tuple_vec(vec: &Vec<PairUi>, vars: &Vec<PairUi>) -> Vec<(String, Str
         .collect()
 }
 
-pub fn save_project(dir: &str, project: &Project) -> Result<()> {
+pub fn save_project(dir: &str, project: &Project, font_size: f32) -> Result<()> {
     if project.name.is_empty() {
         bail!("项目名称不能为空")
     };
@@ -202,6 +236,7 @@ pub fn save_project(dir: &str, project: &Project) -> Result<()> {
     // 在保存 .config
     let config_content = serde_json::to_vec(&AppConfig {
         project_path: save_path.to_str().unwrap().to_string(),
+        font_size,
     })?;
 
     std::fs::write(Path::new(dir).join("./.config.json"), config_content)?;
@@ -209,7 +244,11 @@ pub fn save_project(dir: &str, project: &Project) -> Result<()> {
     Ok(())
 }
 
-pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Result<HttpResponse> {
+pub async fn http_send(
+    req_cfg: &HttpRequestConfig,
+    vars: &Vec<PairUi>,
+    script_output: Arc<Mutex<Vec<String>>>,
+) -> Result<HttpResponse> {
     let mut request_size = 0u64;
     request_size += req_cfg.url.len() as u64;
     request_size += req_cfg.body_raw.len() as u64;
@@ -225,7 +264,7 @@ pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Resul
 
     // 执行 Pre-Request Script
     if req_cfg.script_enabled && !req_cfg.pre_request_script.trim().is_empty() {
-        let mut engine = ScriptEngine::new();
+        let mut engine = ScriptEngine::new(script_output.clone());
 
         let context = PreRequestContext {
             url: modified_req_cfg.url.clone(),
@@ -292,11 +331,15 @@ pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Resul
                         }
                     }
                 } else if let Some(err) = result.error {
-                    eprintln!("Pre-request script error: {}", err);
+                    if let Ok(mut output) = script_output.lock() {
+                        output.push(format!("Pre-request script error: {}", err));
+                    }
                 }
             }
             Err(e) => {
-                eprintln!("Pre-request script execution error: {}", e);
+                if let Ok(mut output) = script_output.lock() {
+                    output.push(format!("Pre-request script execution error: {}", e));
+                }
             }
         }
     }
@@ -325,7 +368,7 @@ pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Resul
 
     // 执行 Post-Response Script
     if req_cfg.script_enabled && !req_cfg.post_response_script.trim().is_empty() {
-        let mut engine = ScriptEngine::new();
+        let mut engine = ScriptEngine::new(script_output.clone());
 
         let request_context = PreRequestContext {
             url: modified_req_cfg.url.clone(),
@@ -375,11 +418,15 @@ pub async fn http_send(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> Resul
                         }
                     }
                 } else if let Some(err) = result.error {
-                    eprintln!("Post-response script error: {}", err);
+                    if let Ok(mut output) = script_output.lock() {
+                        output.push(format!("Post-response script error: {}", err));
+                    }
                 }
             }
             Err(e) => {
-                eprintln!("Post-response script execution error: {}", e);
+                if let Ok(mut output) = script_output.lock() {
+                    output.push(format!("Post-response script execution error: {}", e));
+                }
             }
         }
     }
@@ -432,4 +479,95 @@ pub fn parse_var_str(oragin_str: &str, vars: &Vec<PairUi>) -> String {
 
 pub fn real_tuple_fn((k, v): &(&str, &str), vars: &Vec<PairUi>) -> (String, String) {
     (parse_var_str(k, vars), parse_var_str(v, vars))
+}
+
+/// URL 编码辅助函数
+fn url_encode(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+                c.to_string()
+            } else {
+                format!("%{:02X}", c as u8)
+            }
+        })
+        .collect()
+}
+
+/// 将请求配置转换为 curl 命令
+pub fn to_curl_command(req_cfg: &HttpRequestConfig, vars: &Vec<PairUi>) -> String {
+    let mut curl_parts = vec!["curl".to_string()];
+
+    // 处理变量替换
+    let real_url = parse_var_str(&req_cfg.url, vars);
+    let request_query = real_tuple_vec(&req_cfg.query, vars);
+    let request_header = real_tuple_vec(&req_cfg.header, vars);
+
+    // 构建完整的 URL（包括查询参数）
+    let mut full_url = real_url.clone();
+    if !request_query.is_empty() {
+        let query_string: Vec<String> = request_query
+            .iter()
+            .map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v)))
+            .collect();
+        full_url = format!("{}?{}", full_url, query_string.join("&"));
+    }
+
+    // 添加 URL
+    curl_parts.push(format!("'{}'", full_url));
+
+    // 添加方法
+    if req_cfg.method.as_ref() != "GET" {
+        curl_parts.push("-X".to_string());
+        curl_parts.push(req_cfg.method.as_ref().to_string());
+    }
+
+    // 添加 Headers
+    for (key, value) in request_header {
+        curl_parts.push("-H".to_string());
+        curl_parts.push(format!("'{}: {}'", key, value));
+    }
+
+    // 添加 Body
+    match req_cfg.body_tab_ui {
+        crate::RequestBodyTab::Raw => {
+            if !req_cfg.body_raw.is_empty() {
+                let real_body = parse_var_str(&req_cfg.body_raw, vars);
+                curl_parts.push("-d".to_string());
+                // 转义单引号并包装在单引号中
+                let escaped_body = real_body.replace("'", "'\\''");
+                curl_parts.push(format!("'{}'", escaped_body));
+            }
+        }
+        crate::RequestBodyTab::Form => {
+            let request_body_form = real_tuple_vec(&req_cfg.body_form, vars);
+            for (key, value) in request_body_form {
+                curl_parts.push("--data-urlencode".to_string());
+                curl_parts.push(format!("'{}={}'", key, value));
+            }
+        }
+        crate::RequestBodyTab::FormData => {
+            let request_body_form_data = real_tuple_vec(&req_cfg.body_form_data, vars);
+            for (key, value) in request_body_form_data {
+                if !value.is_empty() && value.contains('@') {
+                    // 文件字段
+                    let filepaths: Vec<_> = value
+                        .split('@')
+                        .filter(|e| !e.is_empty())
+                        .map(|e| e.trim())
+                        .collect();
+                    for filepath in filepaths {
+                        curl_parts.push("-F".to_string());
+                        curl_parts.push(format!("'{}=@{}'", key, filepath));
+                    }
+                } else {
+                    // 普通字段
+                    curl_parts.push("-F".to_string());
+                    curl_parts.push(format!("'{}={}'", key, value));
+                }
+            }
+        }
+    }
+
+    curl_parts.join(" \\\n  ")
 }
