@@ -208,12 +208,59 @@ pub fn pair_table_with_file_picker(ui: &mut Ui, id: impl std::hash::Hash, pair_v
 }
 
 pub fn code_view_ui(ui: &mut egui::Ui, mut code: &str) {
+    code_view_with_syntax(ui, code, "json");
+}
+
+pub fn code_view_with_syntax(ui: &mut egui::Ui, mut code: &str, language: &str) {
+    use egui_extras::syntax_highlighting;
+
+    let theme = syntax_highlighting::CodeTheme::from_memory(ui.ctx(), ui.style());
+    let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+        let mut layout_job = syntax_highlighting::highlight(
+            ui.ctx(),
+            ui.style(),
+            &theme,
+            buf.as_str(),
+            language,
+        );
+        layout_job.wrap.max_width = wrap_width;
+        ui.fonts(|f| f.layout_job(layout_job))
+    };
+
     ui.add(
         egui::TextEdit::multiline(&mut code)
-            .font(egui::TextStyle::Monospace) // for cursor height
+            .font(egui::TextStyle::Monospace)
             .code_editor()
             .desired_rows(1)
             .lock_focus(true)
-            .desired_width(f32::INFINITY),
+            .desired_width(f32::INFINITY)
+            .layouter(&mut layouter),
+    );
+}
+
+/// 可编辑的代码编辑器，带语法高亮
+pub fn code_edit_with_syntax(ui: &mut egui::Ui, code: &mut String, language: &str, desired_rows: usize) {
+    use egui_extras::syntax_highlighting;
+
+    let theme = syntax_highlighting::CodeTheme::from_memory(ui.ctx(), ui.style());
+    let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+        let mut layout_job = syntax_highlighting::highlight(
+            ui.ctx(),
+            ui.style(),
+            &theme,
+            buf.as_str(),
+            language,
+        );
+        layout_job.wrap.max_width = wrap_width;
+        ui.fonts(|f| f.layout_job(layout_job))
+    };
+
+    ui.add(
+        egui::TextEdit::multiline(code)
+            .font(egui::TextStyle::Monospace)
+            .code_editor()
+            .desired_rows(desired_rows)
+            .desired_width(f32::INFINITY)
+            .layouter(&mut layouter),
     );
 }

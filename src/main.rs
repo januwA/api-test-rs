@@ -558,14 +558,13 @@ impl ApiTestApp {
                 // 字体大小调节
                 ui.horizontal(|ui| {
                     ui.label("🔤 字体大小:");
-                    let mut changed = false;
                     if ui
-                        .add(egui::Slider::new(&mut self.font_size, 10.0..=24.0).step_by(1.0))
+                        .add(egui::DragValue::new(&mut self.font_size)
+                            .speed(0.5)
+                            .range(10.0..=24.0)
+                            .suffix(" px"))
                         .changed()
                     {
-                        changed = true;
-                    }
-                    if changed {
                         util::setup_custom_fonts(ctx, self.font_size);
                     }
                 });
@@ -742,15 +741,34 @@ impl ApiTestApp {
                                                             };
 
                                                             ui.horizontal(|ui| {
-                                                                if ui
+                                                                let label_response = ui
                                                                     .selectable_label(
                                                                         checked, &cfg.name,
-                                                                    )
-                                                                    .clicked()
-                                                                {
+                                                                    );
+
+                                                                if label_response.clicked() {
                                                                     self.select_test =
                                                                         Some((group_index, cfg_i));
                                                                 }
+
+                                                                // 右键菜单
+                                                                label_response.context_menu(|ui| {
+                                                                    if ui.button("📋 Copy").clicked() {
+                                                                        self.copy_test = Some((group_index, cfg_i));
+                                                                        ui.close_menu();
+                                                                    }
+                                                                    if ui.button("✏️ Edit").clicked() {
+                                                                        self.modal.open = true;
+                                                                        self.modal.title = "Test Edit".to_owned();
+                                                                        self.select_test = Some((group_index, cfg_i));
+                                                                        self.modal.r#type = ModalType::HandleTest;
+                                                                        ui.close_menu();
+                                                                    }
+                                                                    if ui.button("🗑️ Delete").clicked() {
+                                                                        self.remove_test = Some((group_index, cfg_i));
+                                                                        ui.close_menu();
+                                                                    }
+                                                                });
 
                                                                 if ui
                                                                     .button("Copy")
@@ -845,18 +863,25 @@ impl ApiTestApp {
                         );
 
                         if http_test.request.method != Method::WS {
-                            let count_input = ui.add(
-                                egui::TextEdit::singleline(&mut http_test.send_count_ui)
-                                    .desired_width(80.)
-                                    .hint_text("Count"),
+                            // 使用 DragValue 进行数值输入
+                            let mut temp_count = http_test.send_count_ui.parse::<usize>().unwrap_or(1);
+                            let drag_response = ui.add(
+                                egui::DragValue::new(&mut temp_count)
+                                    .speed(1.0)
+                                    .range(1..=10_000_000)
+                                    .prefix("Count: ")
                             );
 
-                            if let Ok(count) = http_test.send_count_ui.parse::<usize>() {
-                                if count > 10_000_000 {
-                                    count_input.on_hover_text("警告: 超过1000万可能导致性能问题");
-                                } else if count > 100_000 {
-                                    count_input.on_hover_text("提示: 超过10万可能需要较长时间");
-                                }
+                            // 同步回字符串
+                            if drag_response.changed() {
+                                http_test.send_count_ui = temp_count.to_string();
+                            }
+
+                            // 悬停提示
+                            if temp_count > 10_000_000 {
+                                drag_response.on_hover_text("警告: 超过1000万可能导致性能问题");
+                            } else if temp_count > 100_000 {
+                                drag_response.on_hover_text("提示: 超过10万可能需要较长时间");
                             }
                         }
 
@@ -899,6 +924,7 @@ impl ApiTestApp {
                         }
 
                         if is_running {
+                            ui.spinner();
                             if ui.button("Cancel").clicked() {
                                 http_test.stats.sending = 0;
                                 http_test.stats.total_end_time = Some(std::time::Instant::now());
@@ -962,6 +988,7 @@ impl ApiTestApp {
                         }
                     }
                     ui.separator();
+                    ui.add_space(5.0);
 
                     // 请求数据
                     widget::horizontal_tabs(ui, REQ_TABS.iter(), &mut http_test.tab_ui);
@@ -1006,13 +1033,23 @@ impl ApiTestApp {
                                             .id_salt("row data scroll")
                                             .auto_shrink([false, false])
                                             .show(ui, |ui| {
-                                                ui.add_sized(
-                                                    [ui.available_width(), 200.0],
-                                                    egui::TextEdit::multiline(
+                                                // 根据数据类型选择语法高亮
+                                                let language = match http_test.request.body_raw_type {
+                                                    RequestBodyRawType::Json => "json",
+                                                    RequestBodyRawType::XML => "xml",
+                                                    RequestBodyRawType::Form => "txt",
+                                                    RequestBodyRawType::Text => "txt",
+                                                    RequestBodyRawType::BinaryFile => "txt",
+                                                };
+
+                                                ui.vertical(|ui| {
+                                                    widget::code_edit_with_syntax(
+                                                        ui,
                                                         &mut http_test.request.body_raw,
-                                                    )
-                                                    .desired_width(f32::INFINITY),
-                                                );
+                                                        language,
+                                                        10
+                                                    );
+                                                });
                                             });
                                     });
                                 }
@@ -1054,12 +1091,12 @@ impl ApiTestApp {
                                     .id_salt("pre_request_script_scroll")
                                     .max_height(200.0)
                                     .show(ui, |ui| {
-                                        ui.add(
-                                            egui::TextEdit::multiline(&mut http_test.request.pre_request_script)
-                                                .font(egui::TextStyle::Monospace)
-                                                .code_editor()
-                                                .desired_rows(10)
-                                                .desired_width(f32::INFINITY),
+                                        // 使用 Rust 语法高亮（Rhai 语法类似 Rust）
+                                        widget::code_edit_with_syntax(
+                                            ui,
+                                            &mut http_test.request.pre_request_script,
+                                            "rs",
+                                            10
                                         );
                                     });
 
@@ -1073,12 +1110,12 @@ impl ApiTestApp {
                                     .id_salt("post_response_script_scroll")
                                     .max_height(200.0)
                                     .show(ui, |ui| {
-                                        ui.add(
-                                            egui::TextEdit::multiline(&mut http_test.request.post_response_script)
-                                                .font(egui::TextStyle::Monospace)
-                                                .code_editor()
-                                                .desired_rows(10)
-                                                .desired_width(f32::INFINITY),
+                                        // 使用 Rust 语法高亮（Rhai 语法类似 Rust）
+                                        widget::code_edit_with_syntax(
+                                            ui,
+                                            &mut http_test.request.post_response_script,
+                                            "rs",
+                                            10
                                         );
                                     });
 
@@ -1102,6 +1139,13 @@ impl ApiTestApp {
                                     ui.label("示例 - 判断业务状态码:");
                                     ui.code("let result = parse_json(response.body);");
                                     ui.code("vars[\"test_result\"] = if result.code == 0 { \"PASS\" } else { \"FAIL\" };");
+
+                                    ui.add_space(5.0);
+                                    ui.separator();
+                                    ui.horizontal(|ui| {
+                                        ui.label("📚 脚本引擎:");
+                                        ui.hyperlink_to("Rhai 文档", "https://rhai.rs/book/");
+                                    });
                                 });
 
                                 ui.add_space(10.0);
@@ -1144,6 +1188,7 @@ impl ApiTestApp {
                         RequestTab::Curl => {
                             ui.vertical(|ui| {
                                 ui.label("当前请求的 cURL 命令:");
+                                ui.separator();
                                 ui.add_space(5.0);
 
                                 // 生成 curl 命令
@@ -1167,18 +1212,26 @@ impl ApiTestApp {
 
                                 ui.add_space(10.0);
                                 ui.horizontal(|ui| {
-                                    if ui.button("Copy to Clipboard").clicked() {
+                                    if ui.button("📋 Copy to Clipboard").clicked() {
                                         ui.output_mut(|o| o.copied_text = curl_command.clone());
                                     }
                                     ui.label(egui::RichText::new("提示: 可以直接在终端中执行此命令")
                                         .italics()
                                         .weak());
                                 });
+
+                                ui.add_space(5.0);
+                                ui.horizontal(|ui| {
+                                    ui.label("📚");
+                                    ui.hyperlink_to("cURL 文档", "https://curl.se/docs/");
+                                });
                             });
                         }
                     };
 
+                    ui.add_space(8.0);
                     ui.separator();
+                    ui.add_space(5.0);
 
                     if http_test.request.method == Method::WS {
                         ui.horizontal(|ui| {
@@ -1230,7 +1283,7 @@ impl ApiTestApp {
                         return;
                     };
                     // 从字节码中初始化数据
-                    let (processed_text, has_img) = ApiTestApp::process_response_data(self.is_pretty, ui.ctx(), response);
+                    let (processed_text, has_img, has_video) = ApiTestApp::process_response_data(self.is_pretty, ui.ctx(), response);
 
                     // 请求返回状态
                     ui.horizontal(|ui| {
@@ -1311,6 +1364,74 @@ impl ApiTestApp {
                                                 )
                                                 .rounding(5.0),
                                             );
+                                        } else if has_video {
+                                            ui.vertical_centered(|ui| {
+                                                ui.add_space(20.0);
+                                                ui.label(
+                                                    egui::RichText::new("🎬 检测到视频内容")
+                                                        .size(18.0)
+                                                        .color(egui::Color32::from_rgb(100, 149, 237))
+                                                );
+                                                ui.add_space(10.0);
+
+                                                if let Some(content_type) = response.content_type() {
+                                                    ui.label(format!("类型: {}", content_type));
+                                                }
+
+                                                ui.label(format!("大小: {} bytes", data_vec.len()));
+                                                ui.add_space(20.0);
+
+                                                if ui.button(
+                                                    egui::RichText::new("▶️ 用系统播放器打开")
+                                                        .size(16.0)
+                                                ).clicked() {
+                                                    // 保存到临时文件并打开
+                                                    let temp_dir = std::env::temp_dir();
+                                                    let file_ext = response.content_type()
+                                                        .and_then(|ct| {
+                                                            if ct.contains("mp4") { Some("mp4") }
+                                                            else if ct.contains("webm") { Some("webm") }
+                                                            else if ct.contains("ogg") { Some("ogg") }
+                                                            else if ct.contains("avi") { Some("avi") }
+                                                            else if ct.contains("mov") { Some("mov") }
+                                                            else if ct.contains("mkv") { Some("mkv") }
+                                                            else { Some("mp4") }
+                                                        })
+                                                        .unwrap_or("mp4");
+
+                                                    let temp_path = temp_dir.join(format!("api_test_video_{}.{}",
+                                                        std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                            .unwrap_or_default()
+                                                            .as_secs(),
+                                                        file_ext
+                                                    ));
+
+                                                    match std::fs::write(&temp_path, data_vec) {
+                                                        Ok(_) => {
+                                                            match open::that(&temp_path) {
+                                                                Ok(_) => {
+                                                                    self.action_status = format!("✅ 已用系统播放器打开: {}", temp_path.display());
+                                                                }
+                                                                Err(e) => {
+                                                                    self.action_status = format!("❌ 打开失败: {}", e);
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            self.action_status = format!("❌ 保存临时文件失败: {}", e);
+                                                        }
+                                                    }
+                                                }
+
+                                                ui.add_space(10.0);
+                                                ui.label(
+                                                    egui::RichText::new("💡 提示: 视频将保存到临时文件夹并用系统默认播放器打开")
+                                                        .italics()
+                                                        .size(12.0)
+                                                        .color(egui::Color32::GRAY)
+                                                );
+                                            });
                                         } else if let Some(text_data) = &processed_text {
                                             widget::code_view_ui(ui, text_data);
                                         } else {
@@ -1352,7 +1473,7 @@ impl ApiTestApp {
                                         ui.group(|ui| {
                                             ui.heading("📥 Response Headers");
                                             ui.separator();
-                                            widget::code_view_ui(ui, &response.headers_str);
+                                            widget::code_view_with_syntax(ui, &response.headers_str, "txt");
                                         });
                                     });
                                 });
@@ -1647,14 +1768,18 @@ impl ApiTestApp {
         is_pretty: bool,
         ctx: &egui::Context,
         response: &HttpResponse,
-    ) -> (Option<String>, bool) {
+    ) -> (Option<String>, bool, bool) {
         let Some(data_vec) = &response.data_vec else {
-            return (None, false);
+            return (None, false, false);
         };
 
         if response.content_type_image() {
             ctx.forget_image("bytes://");
-            return (None, true);
+            return (None, true, false);
+        }
+
+        if response.content_type_video() {
+            return (None, false, true);
         }
 
         let mut data = std::str::from_utf8(data_vec.as_ref())
@@ -1669,7 +1794,7 @@ impl ApiTestApp {
             }
         }
 
-        (Some(data), false)
+        (Some(data), false, false)
     }
 
     fn process_http_responses(&mut self, ctx: &egui::Context) {

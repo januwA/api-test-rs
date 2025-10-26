@@ -481,6 +481,12 @@ impl HttpResponse {
             .and_then(|v| Some(v.contains(APPLICATION_JSON)))
             .unwrap_or(false)
     }
+
+    pub fn content_type_video(&self) -> bool {
+        self.content_type()
+            .and_then(|v| Some(v.starts_with("video/")))
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

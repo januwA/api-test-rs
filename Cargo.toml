@@ -20,7 +20,7 @@ rpath = false
 
 [dependencies]
 eframe = { version = "0.32.1", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence"]}
-egui_extras = { version = "0.32.1", features = ["image"] }
+egui_extras = { version = "0.32.1", features = ["image", "syntect"] }
 image = { version = "0.25" }
 env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
@@ -43,6 +43,8 @@ rand = "0.8"
 futures = "0.3"
 num-format = "0.4"
 rfd = "0.14"
+# 用系统默认程序打开文件
+open = "5.0"
 
 # 脚本引擎
 rhai = { version = "1.19", features = ["sync", "serde"] }
