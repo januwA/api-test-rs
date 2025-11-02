@@ -20,6 +20,7 @@ tauri-plugin-store = "2"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 tokio-tungstenite = "*"
 futures = "0.3"
 futures-util = "0.3.31"

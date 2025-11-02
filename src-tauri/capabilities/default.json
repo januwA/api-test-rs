@@ -1,10 +1,15 @@
 {
   "identifier": "default-capability",
-  "description": "Default capability for the application, including dialog permissions.",
+  "description": "Default capability for the application, including dialog and event permissions.",
   "windows": ["main"],
   "permissions": [
     "dialog-open",
     "dialog-save",
-    "app-commands-default"
+    "app-commands-default",
+    "core:event:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit",
+    "core:event:allow-emit-to"
   ]
 }

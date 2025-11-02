@@ -1,5 +1,4 @@
 import { useEffect, useCallback } from 'react';
-import { message } from 'antd';
 
 interface KeyboardShortcutsOptions {
   onSave?: () => void;
@@ -31,7 +30,6 @@ export function useKeyboardShortcuts(options: KeyboardShortcutsOptions) {
         event.preventDefault();
         if (onSave) {
           onSave();
-          message.success('快捷键: Ctrl+S');
         }
         return;
       }

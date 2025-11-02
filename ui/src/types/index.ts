@@ -45,6 +45,7 @@ export enum ResponseTab {
   Data = "Data",
   Header = "Header",
   Stats = "Stats",
+  Console = "Console",
 }
 
 export interface HttpRequestConfig {

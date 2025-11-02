@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Typography,
   Tag,
@@ -12,7 +12,8 @@ import {
   message,
   Empty,
 } from "antd";
-import { CopyOutlined, RocketOutlined } from "@ant-design/icons";
+import { CopyOutlined, RocketOutlined, ClearOutlined } from "@ant-design/icons";
+import { invoke } from "@tauri-apps/api/core";
 import { useResponseStore } from "../stores/responseStore";
 import { ResponseTab } from "../types";
 import { Tabs as AntdTabs } from "antd";
@@ -24,11 +25,27 @@ function ResponsePanel() {
   const { currentResponse } = useResponseStore();
   const [activeTab, setActiveTab] = useState<ResponseTab>(ResponseTab.Data);
   const [headerTab, setHeaderTab] = useState<string>("request");
+  const [scriptOutput, setScriptOutput] = useState<string[]>([]);
+
+  // 获取脚本输出
+  useEffect(() => {
+    const fetchScriptOutput = async () => {
+      try {
+        const output = await invoke<string[]>("get_script_output");
+        setScriptOutput(output);
+      } catch (error) {
+        console.error("获取脚本输出失败:", error);
+      }
+    };
+
+    fetchScriptOutput();
+  }, [currentResponse]); // 当响应变化时重新获取脚本输出
 
   const tabs = [
     { id: ResponseTab.Data, label: "Data" },
     { id: ResponseTab.Header, label: "Headers" },
     { id: ResponseTab.Stats, label: "Stats" },
+    { id: ResponseTab.Console, label: "Console" },
   ];
 
   if (!currentResponse) {
@@ -125,7 +142,7 @@ function ResponsePanel() {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       {/* Status Bar */}
-      <div style={{ padding: 16 }}>
+      <div style={{ padding: 12 }}>
         <Space size="large">
           {currentResponse.isBatch ? (
             <>
@@ -514,6 +531,81 @@ function ResponsePanel() {
                   ))}
                 </Card>
               )}
+          </div>
+        )}
+
+        {/* Console Tab */}
+        {activeTab === ResponseTab.Console && (
+          <div>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: 16,
+              }}
+            >
+              <Space>
+                <Text type="secondary">
+                  脚本输出日志 ({scriptOutput.length} 条)
+                </Text>
+              </Space>
+              <Button
+                icon={<ClearOutlined />}
+                size="small"
+                onClick={async () => {
+                  try {
+                    await invoke("clear_script_output");
+                    setScriptOutput([]);
+                    message.success("控制台已清空");
+                  } catch (error) {
+                    console.error("清空脚本输出失败:", error);
+                    message.error("清空失败");
+                  }
+                }}
+              >
+                清空
+              </Button>
+            </div>
+
+            {scriptOutput.length > 0 ? (
+              <div
+                style={{
+                  background: "var(--ant-color-bg-container)",
+                  border: "1px solid var(--ant-color-border)",
+                  borderRadius: 8,
+                  padding: 16,
+                  fontFamily: "monospace",
+                  fontSize: 12,
+                  maxHeight: "500px",
+                  overflowY: "auto",
+                }}
+              >
+                {scriptOutput.map((line, index) => (
+                  <div
+                    key={index}
+                    style={{
+                      marginBottom: 4,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                    }}
+                  >
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      [{new Date().toLocaleTimeString()}]
+                    </Text>{" "}
+                    {line}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ textAlign: "center", padding: 32 }}>
+                <Text type="secondary">暂无脚本输出</Text>
+                <br />
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  使用 console_log() 函数在脚本中输出日志
+                </Text>
+              </div>
+            )}
           </div>
         )}
       </div>

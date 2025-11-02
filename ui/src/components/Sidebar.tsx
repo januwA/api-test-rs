@@ -239,7 +239,7 @@ function Sidebar() {
         </div>
 
         {/* 添加组输入框 - 卡片样式 */}
-        <Card size="small" bodyStyle={{ padding: DesignTokens.spacing.sm }}>
+        <Card size="small" styles={{ body: { padding: DesignTokens.spacing.sm } }}>
           <Space.Compact style={{ width: "100%" }}>
             <Input
               placeholder="新建分组..."
@@ -292,73 +292,71 @@ function Sidebar() {
             border: "none",
             background: "transparent",
           }}
-        >
-          {project.groups.map((group, groupIndex) => (
-            <Menu.SubMenu
-              key={`group-${groupIndex}`}
-              title={
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    width: "100%",
-                  }}
-                >
-                  <Space>
-                    <Text strong>
-                      {group.name} ({group.children?.length || 0})
-                    </Text>
-                  </Space>
-                  <Space size="small">
-                    <Tooltip title="复制分组">
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<CopyOutlined />}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          copyGroup(groupIndex);
-                        }}
-                      />
-                    </Tooltip>
-                    <Tooltip title="重命名分组">
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<EditOutlined />}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleRenameGroup(groupIndex, group.name);
-                        }}
-                      />
-                    </Tooltip>
-                    <Popconfirm
-                      title="确定要删除这个分组吗？"
-                      description="删除后无法恢复"
-                      onConfirm={(e) => {
-                        e?.stopPropagation();
-                        deleteGroup(groupIndex);
+          items={project.groups.map((group, groupIndex) => ({
+            key: `group-${groupIndex}`,
+            icon: <FolderOutlined />,
+            label: (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  width: "100%",
+                }}
+              >
+                <Space>
+                  <Text strong>
+                    {group.name} ({group.children?.length || 0})
+                  </Text>
+                </Space>
+                <Space size="small">
+                  <Tooltip title="复制分组">
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<CopyOutlined />}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        copyGroup(groupIndex);
                       }}
-                      onCancel={(e) => e?.stopPropagation()}
-                      okText="确定"
-                      cancelText="取消"
-                    >
-                      <Button
-                        type="text"
-                        size="small"
-                        danger
-                        icon={<DeleteOutlined />}
-                        onClick={(e) => e.stopPropagation()}
-                        title="删除分组"
-                      />
-                    </Popconfirm>
-                  </Space>
-                </div>
-              }
-              icon={<FolderOutlined />}
-            >
-              {(group.children || []).map((test, testIndex) => {
+                    />
+                  </Tooltip>
+                  <Tooltip title="重命名分组">
+                    <Button
+                      type="text"
+                      size="small"
+                      icon={<EditOutlined />}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRenameGroup(groupIndex, group.name);
+                      }}
+                    />
+                  </Tooltip>
+                  <Popconfirm
+                    title="确定要删除这个分组吗？"
+                    description="删除后无法恢复"
+                    onConfirm={(e) => {
+                      e?.stopPropagation();
+                      deleteGroup(groupIndex);
+                    }}
+                    onCancel={(e) => e?.stopPropagation()}
+                    okText="确定"
+                    cancelText="取消"
+                  >
+                    <Button
+                      type="text"
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onClick={(e) => e.stopPropagation()}
+                      title="删除分组"
+                    />
+                  </Popconfirm>
+                </Space>
+              </div>
+            ),
+            children: [
+              ...(group.children || []).map((test, testIndex) => {
                 const testMenuItems: MenuProps["items"] = [
                   {
                     key: "copy",
@@ -403,8 +401,9 @@ function Sidebar() {
                   },
                 ];
 
-                return (
-                  <Menu.Item key={`test-${groupIndex}-${testIndex}`}>
+                return {
+                  key: `test-${groupIndex}-${testIndex}`,
+                  label: (
                     <div
                       style={{
                         display: "flex",
@@ -430,34 +429,32 @@ function Sidebar() {
                         />
                       </Dropdown>
                     </div>
-                  </Menu.Item>
-                );
-              })}
-
-              {/* Add Test Button */}
-              <Menu.Item
-                key={`add-test-${groupIndex}`}
-                style={{
-                  marginTop: DesignTokens.spacing.xs,
-                }}
-              >
-                <Button
-                  type="dashed"
-                  size="small"
-                  block
-                  icon={<PlusOutlined />}
-                  onClick={() => handleAddTestClick(groupIndex)}
-                  style={{
-                    border: "none",
-                    background: "transparent",
-                  }}
-                >
-                  添加测试
-                </Button>
-              </Menu.Item>
-            </Menu.SubMenu>
-          ))}
-        </Menu>
+                  ),
+                };
+              }),
+              // Add Test Button
+              {
+                key: `add-test-${groupIndex}`,
+                label: (
+                  <Button
+                    type="dashed"
+                    size="small"
+                    block
+                    icon={<PlusOutlined />}
+                    onClick={() => handleAddTestClick(groupIndex)}
+                    style={{
+                      border: "none",
+                      background: "transparent",
+                      marginTop: DesignTokens.spacing.xs,
+                    }}
+                  >
+                    添加测试
+                  </Button>
+                ),
+              },
+            ],
+          }))}
+        />
       </div>
 
       {/* Modals */}
