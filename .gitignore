@@ -1,5 +1,141 @@
-/target
-/_SAVE
-*.json
+# ===========================================
+# 项目备份和存档
+# ===========================================
+_old_egui_version/
+_SAVED/
+_SAVE/
+
+# ===========================================
+# 依赖和包管理
+# ===========================================
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+Cargo.lock
+
+# ===========================================
+# 构建产物和输出目录
+# ===========================================
+dist/
+build/
+out/
+target/
+src-tauri/target/
+
+# Tauri 应用包
+src-tauri/bundle/
+
+# ===========================================
+# 开发工具和缓存
+# ===========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# TypeScript
+*.tsbuildinfo
+
+# Rust
+Cargo.lock
+
+# ===========================================
+# 环境变量和敏感信息
+# ===========================================
 .env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 .claude
+
+# ===========================================
+# 日志和调试文件
+# ===========================================
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# ===========================================
+# 操作系统文件
+# ===========================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# ===========================================
+# 临时文件
+# ===========================================
+*.tmp
+*.temp
+.cache/
+.tmp/
+
+# ===========================================
+# 备份文件
+# ===========================================
+*.bak
+*.backup
+*.orig
+*.rej
+
+# ===========================================
+# 特定于项目的忽略
+# ===========================================
+# 保留重要的配置文件
+!package.json
+!tsconfig.json
+!vite.config.ts
+!tailwind.config.js
+!postcss.config.js
+!src-tauri/Cargo.toml
+!src-tauri/tauri.conf.json
+
+# 迁移相关的临时文档
+CLEANUP_SUMMARY.md
+FEATURES_COMPLETED.md
+FINAL_SUMMARY.md
+MIGRATION_GUIDE.md
+RUN_APP.md
+
+# 测试和示例项目文件（在 src-tauri 目录中）
+src-tauri/*.json
+!src-tauri/tauri.conf.json
+
+# 用户生成的内容（如果需要的话可以取消注释）
+# *.json

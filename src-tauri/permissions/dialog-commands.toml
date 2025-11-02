@@ -1,0 +1,13 @@
+[[permission]]
+identifier = "dialog-open"
+description = "Allows opening file dialogs."
+commands.allow = [
+  "plugin:dialog|open"
+]
+
+[[permission]]
+identifier = "dialog-save"
+description = "Allows saving file dialogs."
+commands.allow = [
+  "plugin:dialog|save"
+]

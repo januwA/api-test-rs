@@ -1,0 +1,22 @@
+[[permission]]
+identifier = "app-commands-default"
+description = "Allows access to all custom commands."
+commands.allow = [
+  "load_project",
+  "save_project",
+  "create_project",
+  "get_project",
+  "update_project",
+  "send_http_request",
+  "send_http_batch",
+  "connect_websocket",
+  "send_websocket_message",
+  "close_websocket",
+  "get_variables",
+  "set_variable",
+  "delete_variable",
+  "get_script_output",
+  "clear_script_output",
+  "parse_curl_command",
+  "generate_curl_command"
+]

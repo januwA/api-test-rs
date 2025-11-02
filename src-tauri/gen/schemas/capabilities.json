@@ -1,0 +1,1 @@
+{"default-capability":{"identifier":"default-capability","description":"Default capability for the application, including dialog permissions.","local":true,"windows":["main"],"permissions":["dialog-open","dialog-save","app-commands-default"]}}

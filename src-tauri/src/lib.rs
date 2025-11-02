@@ -2,8 +2,14 @@ use anyhow::{bail, Result};
 use reqwest::{header::HeaderMap, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
-mod util;
+
+// 公开导出模块
+pub mod util;
 pub mod script_engine;
+
+// 重新导出常用类型
+pub use util::*;
+pub use script_engine::*;
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -94,12 +100,15 @@ impl RequestStats {
         if self.response_times.len() < self.max_response_times {
             self.response_times.push(time);
         } else if self.max_response_times > 0 {
-            use std::collections::hash_map::RandomState;
-            use std::hash::{BuildHasher, Hash, Hasher};
-            let mut hasher = RandomState::new().build_hasher();
-            time.hash(&mut hasher);
-            let idx = (hasher.finish() as usize) % self.max_response_times;
-            self.response_times[idx] = time;
+            // 使用Reservoir Sampling算法进行更好的采样
+            // 每当收到第n个样本时，以k/n的概率替换现有样本
+            // 其中k是采样池的大小
+            let n = self.total_requests() as f64;
+            let k = self.max_response_times as f64;
+            if rand::random::<f64>() < (k / n) {
+                let idx = rand::random::<usize>() % self.max_response_times;
+                self.response_times[idx] = time;
+            }
         }
     }
 
@@ -193,7 +202,7 @@ impl RequestStats {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpRequestConfig {
     pub method: Method,
     pub url: String,
@@ -217,25 +226,6 @@ pub struct HttpRequestConfig {
     /// 是否启用脚本
     #[serde(default)]
     pub script_enabled: bool,
-}
-
-impl Clone for HttpRequestConfig {
-    fn clone(&self) -> Self {
-        Self {
-            method: self.method.clone(),
-            url: self.url.clone(),
-            body_tab_ui: self.body_tab_ui.clone(),
-            query: self.query.clone(),
-            header: self.header.clone(),
-            body_form: self.body_form.clone(),
-            body_form_data: self.body_form_data.clone(),
-            body_raw: self.body_raw.clone(),
-            body_raw_type: self.body_raw_type.clone(),
-            pre_request_script: self.pre_request_script.clone(),
-            post_response_script: self.post_response_script.clone(),
-            script_enabled: self.script_enabled,
-        }
-    }
 }
 
 impl Default for HttpRequestConfig {
@@ -361,7 +351,7 @@ impl HttpRequestConfig {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpTest {
     pub name: String,
     pub tab_ui: RequestTab,
@@ -415,22 +405,7 @@ impl HttpTest {
     }
 }
 
-impl Clone for HttpTest {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.to_owned(),
-            tab_ui: self.tab_ui.to_owned(),
-            response: None,
-            response_tab_ui: self.response_tab_ui.to_owned(),
-            request: self.request.to_owned(),
-            download_path: Default::default(),
-            response_vec: Default::default(),
-            send_count_ui: self.send_count_ui.to_owned(),
-            send_count: 0,
-            stats: Default::default(),
-        }
-    }
-}
+
 
 impl Default for HttpTest {
     fn default() -> Self {
@@ -449,12 +424,15 @@ impl Default for HttpTest {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpResponse {
+    #[serde(skip)]
     pub headers: HeaderMap,
     pub headers_str: String,
+    pub request_headers_str: String,
+    #[serde(with = "version_serde")]
     pub version: reqwest::Version,
-    pub status: reqwest::StatusCode,
+    pub status: u16,
     pub img: Option<()>,
     pub text: Option<String>,
     pub data_vec: Option<Vec<u8>>,
@@ -463,6 +441,26 @@ pub struct HttpResponse {
     pub response_size: u64,
     /// 脚本修改后的环境变量
     pub modified_vars: Option<Vec<PairUi>>,
+}
+
+mod version_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use reqwest::Version;
+
+    pub fn serialize<S>(version: &Version, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format!("{:?}", version))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Version, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let _s = String::deserialize(deserializer)?;
+        Ok(Version::HTTP_11) // Default version
+    }
 }
 
 impl HttpResponse {
@@ -604,10 +602,10 @@ impl Default for Method {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Group {
     pub name: String,
-    pub childrent: Vec<HttpTest>,
+    pub children: Vec<HttpTest>,
 
     #[serde(skip)]
     pub new_child_name: String,
@@ -617,14 +615,14 @@ impl Group {
     pub fn from_name(name: String) -> Self {
         Group {
             name,
-            childrent: Default::default(),
+            children: Default::default(),
             new_child_name: Default::default(),
         }
     }
 
     pub fn create_child(&mut self) {
         if !self.new_child_name.is_empty() {
-            self.childrent
+            self.children
                 .push(HttpTest::from_name(self.new_child_name.to_owned()));
             self.new_child_name.clear();
         }
@@ -651,7 +649,7 @@ impl AppConfig {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
     pub groups: Vec<Group>,
